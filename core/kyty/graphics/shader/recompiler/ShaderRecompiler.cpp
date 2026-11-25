@@ -26,7 +26,12 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
+#include <string_view>
 #include <fmt/format.h>
 #include <map>
 #include <mutex>
@@ -548,8 +553,37 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	return TranslateProgram(source.decoded, options);
 }
 
+static bool ListedInSkipShaders(uint64_t hash) {
+	static const std::vector<uint64_t> listed = [] {
+		std::vector<uint64_t> hashes;
+		const char* value = std::getenv("KYTY_SKIP_SHADERS");
+		std::string_view text = value != nullptr ? value : "";
+		while (!text.empty()) {
+			const auto comma = text.find(',');
+			auto item = text.substr(0, comma);
+			text = comma == std::string_view::npos ? std::string_view {} : text.substr(comma + 1);
+			if (item.starts_with("0x") || item.starts_with("0X")) {
+				item.remove_prefix(2);
+			}
+			uint64_t hash = 0;
+			const auto [end, error] = std::from_chars(item.data(), item.data() + item.size(), hash, 16);
+			if (item.empty() || error != std::errc() || end != item.data() + item.size()) {
+				std::fprintf(stderr, "KYTY_SKIP_SHADERS: '%.*s' is not a hexadecimal shader hash; ignored\n",
+				             static_cast<int>(item.size()), item.data());
+				continue;
+			}
+			hashes.push_back(hash);
+		}
+		return hashes;
+	}();
+	return std::find(listed.begin(), listed.end(), hash) != listed.end();
+}
+
 TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileOptions& options) {
 	EXIT_IF(decoded.instructions.empty());
+	if (ListedInSkipShaders(options.shader_hash)) {
+		EXIT("shader 0x%016" PRIx64 " is listed in KYTY_SKIP_SHADERS\n", options.shader_hash);
+	}
 	if (decoded.has_swap_pc) {
 		for (const auto& inst: decoded.instructions) {
 			if (inst.opcode == Decoder::Opcode::S_SWAPPC_B64 && inst.branch_target == UINT32_MAX)
