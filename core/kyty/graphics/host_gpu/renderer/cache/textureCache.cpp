@@ -1333,19 +1333,16 @@ bool TextureCache::DepthOverlapNeedsRecreate(const ImageInfo& requested, Binding
 	}
 	const bool stencil_match = requested.HasStencil() == cached.info.HasStencil();
 	const bool bpp_match     = requested.bytes_per_block == cached.info.bytes_per_block;
-	const bool retain_cached_layout = RetainsCachedDepthLayout(requested, cached);
-	const bool raw_depth_texture =
-	    cached.info.IsDepth() && !requested.IsDepth() && !cached.info.HasStencil() &&
-	    !requested.HasMetadata() && cached.backing.samples == 1 && requested.samples == 1 &&
-	    requested.pitch == cached.info.pitch &&
-	    (requested.resources == cached.info.resources || retain_cached_layout) &&
-	    !IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format);
+	const bool color_view_of_depth =
+	    cached.info.IsDepth() && !requested.IsDepth() &&
+	    !IsSupportedSampledDepthFormat(cached.info.pixel_format, requested.pixel_format) &&
+	    !(cached.info.HasStencil() && ImageViewOps::IsStencilViewFormat(requested.pixel_format));
 	bool recreate = cached.info.resources < requested.resources ||
 	                requested.IsVolume() != cached.info.IsVolume();
 	switch (binding) {
 		case BindingType::Texture:
 			recreate |= requested.IsDepth() && !cached.info.IsDepth();
-			recreate |= raw_depth_texture;
+			recreate |= color_view_of_depth;
 			break;
 		case BindingType::Storage: recreate |= cached.info.IsDepth(); break;
 		case BindingType::RenderTarget: recreate |= cached.info.IsDepth(); break;

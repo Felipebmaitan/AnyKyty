@@ -8,15 +8,6 @@ namespace Libs::Graphics {
 
 namespace {
 
-[[nodiscard]] bool IsStencilViewFormat(vk::Format format) {
-	switch (format) {
-		case vk::Format::eS8Uint:
-		case vk::Format::eR8Uint:
-		case vk::Format::eR8Unorm: return true;
-		default: return false;
-	}
-}
-
 [[nodiscard]] bool IsValidViewType(const VulkanImage& image, const ImageViewInfo& info) {
 	switch (image.image_type) {
 		case vk::ImageType::e2D:
@@ -285,7 +276,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		normalized.aspect = vk::ImageAspectFlagBits::eDepth;
 	}
 	if (image_aspect & vk::ImageAspectFlagBits::eStencil &&
-	    IsStencilViewFormat(normalized.format)) {
+	    ImageViewOps::IsStencilViewFormat(normalized.format)) {
 		normalized.format = image.format;
 		normalized.aspect = vk::ImageAspectFlagBits::eStencil;
 	}
