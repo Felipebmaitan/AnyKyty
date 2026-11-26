@@ -1,9 +1,11 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineStoreFormat.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
 #include "common/stringUtils.h"
+#include "graphics/host_gpu/renderer/rayTracing.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 
@@ -168,6 +170,7 @@ struct PipelineCache::StoreRecord {
 	ProgramKey                         key;
 	ShaderRecompiler::IR::ResourcePlan plan;
 	bool                               plan_loaded = false;
+	bool                               incompatible = false;
 	ShaderModule                       module;
 	GraphicsPipelineKey                pipeline {};
 	uint64_t                           layout_key = 0;
@@ -223,7 +226,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 			kept++;
 		}
 		for (size_t i = kept + 1; i < frames.size(); i++) {
-			if (read[i] != 0 && loaded[i].type == Record::Module) {
+			if (read[i] != 0 && loaded[i].type == Record::Module && !loaded[i].incompatible) {
 				DestroyModule(loaded[i].module);
 			}
 		}
@@ -343,6 +346,11 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 	        .count()));
 }
 
+static uint32_t StoredRayTracingMode(const ShaderModule& module) {
+	return RayTracingModuleMode(module.bvh, module.info.stage, RayTracing::NativeTraversals() && !module.guest_traversal,
+	                            Config::RayTracingEmulation(), Config::RayTracingOracle());
+}
+
 bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord& record) const {
 	Frame frame;
 	std::memcpy(&frame, frame_bytes.data(), sizeof(frame));
@@ -363,6 +371,13 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 			IoStoreModule(reader, record.key, module, plan, spirv, plain_spirv);
 			if (!complete()) {
 				return false;
+			}
+			record.key.guest_traversal = module.guest_traversal;
+			const auto& info = module.info.info;
+			const bool legacy_rt = module.bvh == ShaderBvh::None && (info.bvh || info.bvh8 || info.ray_query);
+			if (legacy_rt || module.rt_mode != StoredRayTracingMode(module)) {
+				record.incompatible = true;
+				return true;
 			}
 			const std::array<const ShaderModule*, 1> stages {&module};
 			if (!SampledDescriptorBudgetFits(stages)) return false;
@@ -393,6 +408,7 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 bool PipelineCache::AddRecord(StoreRecord& record) {
 	switch (record.type) {
 		case Record::Module: {
+			if (record.incompatible) return true;
 			const auto [program, inserted] = m_program_cache.try_emplace(std::move(record.key));
 			if (inserted) {
 				if (!record.plan_loaded) {

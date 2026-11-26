@@ -1069,7 +1069,7 @@ void DefineModule(EmitterState& state) {
 	    state.quad_lanes) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
-	if (state.lane_count == 2 || state.program.info.subgroup_ballot || state.ray_stats ||
+	if (state.lane_count == 2 || state.program.info.subgroup_ballot || state.program.info.ray_query_sites != 0 ||
 	    state.quad_lanes) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}

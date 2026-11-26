@@ -369,6 +369,8 @@ struct ShaderModule {
 	uint32_t                                     spirv_words = 0;
 	std::shared_ptr<const ShaderModule>          plain;
 	bool                                         guest_traversal = false;
+	ShaderBvh                                    bvh = ShaderBvh::None;
+	uint32_t                                     rt_mode = 0;
 	const ShaderRecompiler::IR::ResourcePlan*    plan = nullptr;
 #if defined(ANYPS5_KYTY)
 	mutable bool                                 pipeline_requested = false;
@@ -593,6 +595,7 @@ private:
 		uint64_t              hash            = 0;
 		uint32_t              user_data_count = 0;
 		std::vector<uint32_t> static_state;
+		bool                  guest_traversal = false;
 
 		bool operator==(const ProgramKey&) const = default;
 	};
@@ -972,7 +975,7 @@ private:
 inline constexpr uint32_t RuntimeBuffersKey = 0x52425546u;
 inline constexpr uint32_t RuntimeSamplersKey = 0x53414d50u;
 
-void AppendNativeRayTracingKey(ShaderType stage, std::vector<uint32_t>& key, bool native = true);
+uint32_t RayTracingModuleMode(ShaderBvh bvh, ShaderType stage, bool native, bool emulation, uint32_t oracle);
 
 std::string PipelineCacheTitleId();
 std::filesystem::path ShaderStorePath();

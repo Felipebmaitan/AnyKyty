@@ -56,7 +56,8 @@ public:
 	static constexpr uint32_t HACK_MARK_COUNTS    = 4;
 	static constexpr uint32_t HACK_MARK_GUEST_RAYS = HACK_MARK_COUNTS + static_cast<uint32_t>(HackMark::Count);
 	static constexpr uint64_t HACK_MARKS_SIZE     = uint64_t {HACK_MARK_ENTRIES} * HACK_MARK_DWORDS * 4;
-	static constexpr uint64_t FAULT_BUFFER_SIZE   = HACK_MARKS_OFFSET + HACK_MARKS_SIZE;
+	static constexpr uint64_t RT_STATS_OFFSET     = HACK_MARKS_OFFSET + HACK_MARKS_SIZE;
+	static constexpr uint64_t FAULT_BUFFER_SIZE   = RT_STATS_OFFSET + sizeof(uint32_t);
 	static constexpr uint32_t HACK_MARK_ORACLE_RETURNED   = HACK_MARK_GUEST_RAYS + 1;
 	static constexpr uint32_t HACK_MARK_ORACLE_RAYS       = HACK_MARK_GUEST_RAYS + 2;
 	static constexpr uint32_t HACK_MARK_ORACLE_CANDIDATES = HACK_MARK_GUEST_RAYS + 3;

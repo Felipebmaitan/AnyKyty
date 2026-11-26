@@ -2536,7 +2536,7 @@ void PipelineCache::BuildManifestModule(uint32_t index, std::span<const uint32_t
 	    },
 	    input);
 	const bool native = RayTracing::NativeTraversals() && !guest_traversal;
-	AppendNativeRayTracingKey(options.stage, key.static_state, native);
+	key.guest_traversal = guest_traversal;
 	options.runtime_buffer_descriptors = record.runtime_buffers;
 	options.runtime_sampler_descriptors = record.runtime_samplers;
 	if (record.runtime_buffers) key.static_state.push_back(RuntimeBuffersKey);
@@ -2547,7 +2547,6 @@ void PipelineCache::BuildManifestModule(uint32_t index, std::span<const uint32_t
 	options.dump_ir            = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 	options.emit_debug_info    = Config::GraphicsDebugDumpEnabled();
 	options.native_ray_tracing = native;
-	options.ray_stats          = native && Config::RayTracingStatsEnabled();
 	options.rt_oracle          = native ? Config::RayTracingOracle() : 0u;
 	options.rt_emulation       = Config::RayTracingEmulation();
 	std::vector<uint32_t> spirv;

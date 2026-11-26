@@ -2168,8 +2168,20 @@ void EmitLoopGuardMark(ValueEmitContext& ctx, const IR::Inst& inst) {
 	});
 }
 
+uint32_t RayStatsEnabled(EmitterState& state) {
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer,
+	                          state.fault_buffer_variable, ConstantU32(state, 0),
+	                          ConstantU32(state, BufferCache::RT_STATS_OFFSET / sizeof(uint32_t)));
+	const auto enabled = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), enabled, pointer);
+	return Binary(state, spv::OpINotEqual, TypeBool(state), enabled, ConstantU32(state, 0));
+}
+
 void EmitGuestRayCount(EmitterState& state, uint32_t count) {
-	EmitRayMarkCount(state, BufferCache::HACK_MARK_GUEST_RAYS, count);
+	EmitIfCondition(state, RayStatsEnabled(state), [&] {
+		EmitRayMarkCount(state, BufferCache::HACK_MARK_GUEST_RAYS, count);
+	});
 }
 
 void EmitRayMarkCount(EmitterState& state, uint32_t counter, uint32_t count) {

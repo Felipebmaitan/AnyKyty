@@ -67,6 +67,7 @@ bool EncodeModuleRecord(ShaderType stage, uint64_t hash, uint32_t user_data_coun
 	IoAll(writer, Record::Module, stage, hash, user_data_count, static_state, plan_bytes);
 	IoStoreModuleInfo(writer, module);
 	IoAll(writer, spirv, plain_spirv);
+	IoRayTracingMode(writer, module);
 	if (writer.failure.Failed()) {
 		NoteStoreRefused(stage, hash, writer.failure);
 		return false;
@@ -98,6 +99,7 @@ bool LoadStoredComputeModule(std::istream& input, std::span<const uint8_t> expec
 	std::vector<uint8_t> compressed, raw;
 	ShaderModule selected;
 	std::vector<uint32_t> selected_spirv;
+	std::unordered_set<uint32_t> selected_modes;
 	while (input.peek() != std::char_traits<char>::eof()) {
 		Frame frame;
 		if (!read(&frame, sizeof(frame)) || frame.raw_size > MaxRecordBytes ||
@@ -122,11 +124,16 @@ bool LoadStoredComputeModule(std::istream& input, std::span<const uint8_t> expec
 		IoStoreModule(reader, key, candidate, plan, words, plain);
 		if (!reader.ok || !reader.bytes.empty()) return fail("invalid shader store module record");
 		if (candidate.id != id) continue;
-		if (!selected_spirv.empty()) return fail("duplicate module ID in shader store");
 		if (key.stage != ShaderType::Compute || candidate.info.stage != ShaderType::Compute) {
 			return fail("requested module is not a compute shader");
 		}
 		if (words.empty()) return fail("compute module has no SPIR-V");
+		const auto mode = (candidate.rt_mode << 1u) | uint32_t {candidate.guest_traversal};
+		const bool new_mode = selected_modes.insert(mode).second;
+		if (!selected_spirv.empty()) {
+			if (new_mode && candidate.bvh != ShaderBvh::None && candidate.bvh == selected.bvh && words == selected_spirv) continue;
+			return fail("duplicate module ID in shader store");
+		}
 		selected = std::move(candidate);
 		selected_spirv = std::move(words);
 	}

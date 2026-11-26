@@ -34,12 +34,24 @@ void IoStoreModuleInfo(Stream& io, Module& module) {
 	                            module.rect_parameters, module.mesh_task, module.guest_traversal);
 }
 
+template <class Stream, class Module>
+void IoRayTracingMode(Stream& io, Module& module) {
+	if constexpr (ShaderRecompiler::IR::Reading<Stream>) {
+		if (io.bytes.empty()) return;
+		ShaderRecompiler::IR::IoAll(io, module.bvh, module.rt_mode);
+		io.ok = io.ok && (module.bvh == ShaderBvh::Bvh4 || module.bvh == ShaderBvh::Bvh8Only);
+	} else if (module.bvh != ShaderBvh::None) {
+		ShaderRecompiler::IR::IoAll(io, module.bvh, module.rt_mode);
+	}
+}
+
 template <class Stream, class Program, class Module, class Plan, class Spirv>
 void IoStoreModule(Stream& io, Program& key, Module& module, Plan& plan, Spirv& spirv, Spirv& plain_spirv) {
 	using ShaderRecompiler::IR::IoAll;
 	IoAll(io, key.stage, key.hash, key.user_data_count, key.static_state, plan);
 	IoStoreModuleInfo(io, module);
 	IoAll(io, spirv, plain_spirv);
+	IoRayTracingMode(io, module);
 }
 
 inline bool DecodeShaderStoreFrame(const Frame& frame, std::span<const uint8_t> compressed,

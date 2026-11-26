@@ -772,7 +772,7 @@ uint32_t EmitRayQueryInit(ValueEmitContext& ctx, const IR::Inst& inst) {
 		                                        "the host does not run; they stay exact and emulated\n",
 		                                        s.program.shader_hash, site, always_guest ? "all its" : "some of its"));
 	}
-	if (s.ray_stats) {
+	{
 		const auto guest  = LogicalAnd(s, exec, LogicalNot(s, native));
 		const auto ballot = s.builder.AllocateId();
 		s.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(s, 4), ballot,

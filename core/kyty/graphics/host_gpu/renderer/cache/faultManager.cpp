@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/hackNotice.h"
 #include "common/logging/log.h"
 #include "gpu_tiler_shaders/fault_buffer_process_spv.h"
@@ -92,7 +93,8 @@ FaultManager::~FaultManager() {
 
 void FaultManager::PrepareFaultBuffer() {
 	if (!m_cleared) {
-		m_fault_buffer.Fill(0, m_fault_buffer.Size(), 0);
+		m_fault_buffer.Fill(0, BufferCache::RT_STATS_OFFSET, 0);
+		m_fault_buffer.Fill(BufferCache::RT_STATS_OFFSET, sizeof(uint32_t), Config::RayTracingStatsEnabled() ? 1u : 0u);
 		m_cleared = true;
 	}
 }
@@ -114,7 +116,7 @@ void FaultManager::ProcessFaultBuffer() {
 }
 
 bool FaultManager::ProcessHackMarks() {
-	if (m_marks_tick != 0 || ++m_marks_countdown < HackMarksPeriod) {
+	if ((HackMarkNotices.empty() && !Config::RayTracingStatsEnabled()) || m_marks_tick != 0 || ++m_marks_countdown < HackMarksPeriod) {
 		return false;
 	}
 	m_marks_countdown     = 0;

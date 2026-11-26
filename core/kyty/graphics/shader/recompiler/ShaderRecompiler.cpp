@@ -811,6 +811,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	IR::TrackResources(ir, *tracked, native_cfg, options.input_info, options.runtime_buffer_descriptors,
 	                   options.runtime_sampler_descriptors);
 	TranslateResult result;
+	result.bvh = bvh ? ShaderBvh::Bvh4 : bvh8 ? ShaderBvh::Bvh8Only : ShaderBvh::None;
 	result.program        = std::move(ir);
 	result.oracle_sources      = std::move(oracle_sources);
 	result.oracle_improvements = std::move(oracle_improvements);
@@ -940,7 +941,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 		wide_input.compute      = &wide;
 		Spirv::SplitHints hints;
 		spirv = Spirv::EmitProgram(ir, wide_input, push_data_start_dword, *options.profile, options.emit_debug_info,
-		                           true, options.ray_stats, &hints);
+		                           true, &hints);
 		std::string refusal;
 		if (!Spirv::SplitWaveAcrossSubgroups(spirv, refusal, &hints)) {
 			LOGF("ShaderRecompiler %s wave64 kept in lane pairs: hash=0x%016" PRIx64 " reason=%s\n", stage,
@@ -955,7 +956,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	}
 	if (spirv.empty()) {
 		spirv = Spirv::EmitProgram(ir, options.input_info, push_data_start_dword, *options.profile,
-		                           options.emit_debug_info, true, options.ray_stats);
+		                           options.emit_debug_info, true);
 	}
 	LOGF("ShaderRecompiler %s phase end: hash=0x%016" PRIx64 " SPIR-V EmitProgram words=%" PRIu64
 	     " wave_size=%u elapsed_ms=%" PRIu64 "\n",
@@ -967,7 +968,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	if (options.plain_mip_stats_variant && Spirv::UsesMipStats(ir)) {
 		result.spirv_plain =
 		    Spirv::EmitProgram(ir, options.input_info, push_data_start_dword, *options.profile,
-		                       options.emit_debug_info, false, options.ray_stats);
+		                       options.emit_debug_info, false);
 	}
 	result.spirv          = std::move(spirv);
 	result.program        = std::move(ir);

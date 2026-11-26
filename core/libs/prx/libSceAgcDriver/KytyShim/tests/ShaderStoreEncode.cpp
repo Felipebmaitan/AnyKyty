@@ -130,11 +130,13 @@ void RefusedPlanAbandonsTheStoreEntry() {
 void StoredComputeModuleSelection() {
     using namespace ShaderStoreFormat;
 
-    const auto frame = [](ShaderType stage, uint64_t id) {
+    const auto frame = [](ShaderType stage, uint64_t id, ShaderBvh bvh = ShaderBvh::None, uint32_t mode = 0) {
         ShaderStoreFormat::Key key {.stage = stage, .hash = id};
         ShaderModule module;
         module.id = id;
         module.info.stage = stage;
+        module.bvh = bvh;
+        module.rt_mode = mode;
         const std::vector<uint8_t> plan;
         const std::vector<uint32_t> spirv {0x07230203u, 0x00010300u, 0u, 1u, 0u};
         const std::vector<uint32_t> plain;
@@ -169,6 +171,12 @@ void StoredComputeModuleSelection() {
             "replay accepted a graphics module");
     Require(!load(header + compute + compute, 42) && error.find("duplicate") != std::string::npos,
             "replay accepted duplicate IDs");
+    const auto native = frame(ShaderType::Compute, 42, ShaderBvh::Bvh4, 2);
+    const auto guest = frame(ShaderType::Compute, 42, ShaderBvh::Bvh4, 0);
+    Require(load(header + native + guest, 42) && module.bvh == ShaderBvh::Bvh4 && module.rt_mode == 2,
+            "replay lost a shader shared by two traversal modes");
+    Require(!load(header + native + guest + guest, 42) && error.find("duplicate") != std::string::npos,
+            "replay accepted the same traversal mode twice");
     Require(!load("bad" + compute, 42) && error.find("incompatible") != std::string::npos,
             "replay accepted an incompatible header");
     Require(!load(header + compute + pixel.substr(0, pixel.size() - 1), 42),

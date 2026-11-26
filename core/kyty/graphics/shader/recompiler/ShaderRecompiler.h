@@ -28,7 +28,6 @@ struct CompileOptions {
 	bool                        emit_debug_info            = false;
 	const Spirv::Profile*       profile                    = &Spirv::DefaultProfile;
 	bool                        native_ray_tracing         = false;
-	bool                        ray_stats                  = false;
 	uint32_t                    rt_oracle                  = 0;
 	bool                        rt_emulation               = true;
 	bool                        table_mode                 = false;
@@ -43,6 +42,7 @@ struct CompileOptions {
 };
 
 struct TranslateResult {
+	ShaderBvh                          bvh = ShaderBvh::None;
 	IR::Program                        program;
 	std::string                        decoded_dump;
 	std::string                        cfg_dump;

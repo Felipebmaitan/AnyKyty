@@ -35,7 +35,6 @@ struct Settings {
 	bool     dump      = false;
 	bool     emit      = false;
 	bool     disabled  = false;
-	bool     stats     = false;
 	bool     pixel     = false;
 	uint32_t inputs    = 8;
 	uint32_t oracle    = 0;
@@ -161,7 +160,6 @@ int Probe(const char* label, const std::vector<uint32_t>& code, uint64_t hash, c
 	options.dump_ir               = settings.dump;
 	options.profile               = &profile;
 	options.native_ray_tracing    = !settings.disabled;
-	options.ray_stats             = settings.stats && !settings.disabled;
 	options.rt_oracle             = settings.disabled ? 0u : settings.oracle;
 	options.user_data             = user_data;
 	options.input_info.compute    = &compute;
@@ -369,7 +367,7 @@ int main(int argc, char** argv) {
 		} else if (arg == "--robust") {
 			settings.robust = true;
 		} else if (arg == "--stats") {
-			settings.stats = true;
+			continue;
 		} else if (arg == "--off") {
 			settings.disabled = true;
 		} else if (arg == "--replay-check") {

@@ -35,6 +35,8 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/ir/passes/RayQueryOracle.h"
+#include "graphics/shader/recompiler/ir/passes/RayQueryResults.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -577,25 +579,19 @@ void SkipCallExpansionFailure(uint64_t hash, const ShaderRecompiler::ShaderSourc
 
 }
 
-void AppendNativeRayTracingKey(ShaderType stage, std::vector<uint32_t>& key, bool native) {
-	if (!Config::RayTracingEmulation()) {
-		key.push_back(0x5254454du);
+uint32_t RayTracingModuleMode(ShaderBvh bvh, ShaderType stage, bool native, bool emulation, uint32_t oracle) {
+	if (bvh == ShaderBvh::None) return 0;
+	const uint32_t mode = emulation ? 0u : 1u;
+	if (!native || bvh == ShaderBvh::Bvh8Only) return mode;
+	using namespace ShaderRecompiler::IR;
+	if (stage == ShaderType::Pixel) {
+		if ((oracle & (OraclePixel | OracleRemaining)) != (OraclePixel | OracleRemaining)) return mode;
+	} else if (stage != ShaderType::Compute) {
+		return mode;
 	}
-	if (native && stage == ShaderType::Pixel && RayTracing::NativeTraversals() && Config::RayTracingOracle() != 0) {
-		key.push_back(0x52544f00u | Config::RayTracingOracle());
-		if (Config::RayTracingStatsEnabled()) {
-			key.push_back(0x52545354u);
-		}
-	}
-	if (native && stage == ShaderType::Compute && RayTracing::NativeTraversals()) {
-		key.push_back(0x52545041u);
-		if (Config::RayTracingStatsEnabled()) {
-			key.push_back(0x52545354u);
-		}
-		if (const auto oracle = Config::RayTracingOracle(); oracle != 0) {
-			key.push_back(0x52544f00u | oracle);
-		}
-	}
+	oracle &= ~OraclePixel;
+	if (!emulation && (oracle & OracleRemaining) != 0) oracle |= OracleResults;
+	return mode | 2u | (oracle << 2u);
 }
 
 std::string PipelineCacheTitleId() {
@@ -1427,6 +1423,7 @@ std::optional<ShaderModule> PipelineCache::BuildModule(const ProgramKey&        
 	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
 	compile_options.sampler_limit = std::min(limits.maxPerStageDescriptorSamplers, limits.maxDescriptorSetSamplers);
 	compile_options.plain_mip_stats_variant = key.stage == ShaderType::Pixel;
+	const auto bvh = translated.bvh;
 	auto result = ShaderRecompiler::CompileProgram(std::move(translated), compile_options,
 	                                               specialization, push_data_cursor);
 	if (result.required_samplers > compile_options.sampler_limit) {
@@ -1447,6 +1444,10 @@ std::optional<ShaderModule> PipelineCache::BuildModule(const ProgramKey&        
 	ShaderRecompiler::IR::IoAll(inputs, key.stage, key.hash, key.user_data_count, key.static_state,
 	                            info.bindings.push_data_start_dword, specialization);
 	inputs.Raw(function_code.data(), function_code.size_bytes());
+	if (bvh != ShaderBvh::None) {
+		const auto digest = [](std::span<const uint32_t> words) { return XXH3_64bits(words.data(), words.size_bytes()); };
+		ShaderRecompiler::IR::IoAll(inputs, info, digest(result.spirv), digest(result.spirv_plain));
+	}
 	const auto id = XXH3_64bits(inputs.bytes.data(), inputs.bytes.size());
 
 	const auto* stage = ShaderRecompiler::StageName(key.stage);
@@ -1457,6 +1458,9 @@ std::optional<ShaderModule> PipelineCache::BuildModule(const ProgramKey&        
 	    .info           = std::move(info),
 	    .specialization = specialization,
 	    .function_code  = {function_code.begin(), function_code.end()},
+	    .guest_traversal = key.guest_traversal,
+	    .bvh             = bvh,
+	    .rt_mode         = RayTracingModuleMode(bvh, key.stage, options.native_ray_tracing, options.rt_emulation, options.rt_oracle),
 	};
 	const std::array<const ShaderModule*, 1> stages {&module};
 	if (!SampledDescriptorBudgetFits(stages)) return {};
@@ -1469,8 +1473,6 @@ std::optional<ShaderModule> PipelineCache::BuildModule(const ProgramKey&        
 		module.rect_parameters = RectListParameters(*options.input_info.pixel, module.info);
 	} else if (key.stage == ShaderType::Mesh) {
 		module.mesh_task = options.input_info.vertex->indirect_draw;
-	} else if (key.stage == ShaderType::Compute) {
-		module.guest_traversal = RayTracing::NativeTraversals() && !options.native_ray_tracing;
 	}
 	if (!result.spirv_plain.empty()) {
 		ValidateShaderSpirv(stage, key.hash, result.spirv_plain, profile.maintenance8);
@@ -1780,7 +1782,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	m_lookup_key.hash            = params.hash;
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
-	AppendNativeRayTracingKey(options.stage, m_lookup_key.static_state, !m_guest_traversal);
+	m_lookup_key.guest_traversal = m_guest_traversal;
 	if (m_lane_pairs) {
 		m_lookup_key.static_state.push_back(LanePairsKey);
 	}
@@ -1967,7 +1969,6 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	options.dump_ir         = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 	options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
 	options.native_ray_tracing = RayTracing::NativeTraversals() && !m_guest_traversal;
-	options.ray_stats          = options.native_ray_tracing && Config::RayTracingStatsEnabled();
 	options.rt_oracle          = options.native_ray_tracing ? Config::RayTracingOracle() : 0u;
 	options.rt_emulation       = Config::RayTracingEmulation();
 	options.wave_lane_pairs    = m_lane_pairs;
@@ -2891,7 +2892,6 @@ const ShaderModule* PipelineCache::GetAhead(const ShaderParams& params, InputInf
 	key.hash            = params.hash;
 	key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, key.static_state);
-	AppendNativeRayTracingKey(key.stage, key.static_state);
 	const bool unlocked = t_ahead_unlocked;
 	Program*   program  = nullptr;
 	{
@@ -3135,7 +3135,6 @@ void PipelineCache::RunCompileJob(CompileJob& job, InputInfo& input_info) {
 		options.dump_ir         = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 		options.emit_debug_info = Config::GraphicsDebugDumpEnabled();
 		options.native_ray_tracing = RayTracing::NativeTraversals() && !job.guest_traversal;
-		options.ray_stats          = options.native_ray_tracing && Config::RayTracingStatsEnabled();
 		options.rt_oracle          = options.native_ray_tracing ? Config::RayTracingOracle() : 0u;
 		options.rt_emulation       = Config::RayTracingEmulation();
 		options.wave_lane_pairs    = job.lane_pairs;
@@ -3358,7 +3357,6 @@ const ShaderModule* PipelineCache::ChainModule(const ShaderParams& params, Input
 	key.hash            = params.hash;
 	key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, key.static_state);
-	AppendNativeRayTracingKey(key.stage, key.static_state);
 	ShaderRecompiler::IR::ResourceSpecialization specialization;
 	bool                                         materialized = false;
 	for (uint32_t attempt = 0; attempt < 3; attempt++) {

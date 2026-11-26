@@ -407,7 +407,8 @@ void FlushOracleCounts(EmitterState& s) {
 	if (s.oracle.valid == 0) return;
 	const auto b        = TypeBool(s);
 	const auto counting = Binary(s, spv::OpINotEqual, b, Load(s, TypeU32(s), s.oracle.counting), U32(s, 0));
-	EmitIfCondition(s, s.ray_stats ? ConstantBool(s, true) : counting, [&] {
+	const auto stats    = RayStatsEnabled(s);
+	EmitIfCondition(s, LogicalOr(s, counting, stats), [&] {
 		const auto rays     = SubgroupSum(s, s.oracle.served);
 		const auto guest    = SubgroupSum(s, s.oracle.returned);
 		const auto proposed = SubgroupSum(s, s.oracle.proposed);
@@ -426,9 +427,8 @@ void FlushOracleCounts(EmitterState& s) {
 			AtomicAdd(s, AddressPlus(s, context, ContextWaves), waves);
 			AtomicAdd(s, AddressPlus(s, context, ContextProposed), proposed);
 		});
-		if (!s.ray_stats || s.fault_buffer_variable == 0) return;
 		const auto marked = Binary(s, spv::OpINotEqual, b, Or(s, Or(s, rays, guest), proposed), U32(s, 0));
-		EmitIfCondition(s, LogicalAnd(s, elected, marked), [&] {
+		EmitIfCondition(s, LogicalAnd(s, stats, LogicalAnd(s, elected, marked)), [&] {
 			EmitRayMarkCount(s, BufferCache::HACK_MARK_ORACLE_RETURNED, guest);
 			EmitRayMarkCount(s, BufferCache::HACK_MARK_ORACLE_RAYS, rays);
 			EmitRayMarkCount(s, BufferCache::HACK_MARK_ORACLE_CANDIDATES, proposed);

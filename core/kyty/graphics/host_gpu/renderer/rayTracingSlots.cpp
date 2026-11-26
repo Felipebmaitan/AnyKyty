@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/rayTracing.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "gpu_tiler_shaders/hle_blas_refit_spv.h"
 #include "gpu_tiler_shaders/hle_tlas_spv.h"
@@ -359,6 +360,7 @@ std::string RtShader(uint64_t shader_hash) {
 }
 
 void SummarizeRayTracing() {
+	if (!Config::RayTracingStatsEnabled()) return;
 	auto&      stats = g_rt_stats;
 	const auto now   = std::chrono::duration_cast<std::chrono::nanoseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
@@ -478,6 +480,7 @@ void RayTracing::NoteOracle(uint64_t shader_hash, const OracleCounts& counts) {
 	if (counts.returned != 0) {
 		stats.last_oracle_returned.store(shader_hash, std::memory_order_relaxed);
 	}
+	SummarizeRayTracing();
 }
 
 void RayTracing::NoteGuestRays(uint64_t shader_hash, uint64_t rays) {

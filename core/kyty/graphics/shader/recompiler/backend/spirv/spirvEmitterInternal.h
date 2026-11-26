@@ -199,7 +199,6 @@ struct EmitterState {
 	std::array<bool, 4>                              ray_query_alpha_entry {};
 	std::array<const IR::Inst*, 2>                   ray_query_entry_samples {};
 	OracleVariables                                  oracle;
-	bool                                             ray_stats              = false;
 	std::array<uint32_t, 4>                          ray_stats_first_half {};
 	uint32_t                                         gds_variable            = 0;
 	uint32_t                                         gds_length              = 0;
@@ -656,6 +655,7 @@ void EmitProgram(EmitterState& state);
 
 void DefineGetBdaPointer(EmitterState& state);
 void DefineBdaLoads(EmitterState& state);
+uint32_t RayStatsEnabled(EmitterState& state);
 void EmitGuestRayCount(EmitterState& state, uint32_t count);
 void EmitRayMarkCount(EmitterState& state, uint32_t dword, uint32_t count);
 void DefineIndirectBufferLoads(ValueEmitContext& ctx);
