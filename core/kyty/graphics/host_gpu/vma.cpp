@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
 #include <condition_variable>
 #include <cstdio>
@@ -145,6 +146,56 @@ void DestroyRecycledImages(VmaAllocator allocator) {
 
 }
 
+static uint64_t MemoryBudgetCap() {
+	static const uint64_t cap = [] {
+		const char* value = std::getenv("KYTY_MEMORY_BUDGET_MB");
+		if (value == nullptr || value[0] == '\0') {
+			return UINT64_MAX;
+		}
+		char*      end = nullptr;
+		const auto mib = std::strtoull(value, &end, 10);
+		if (end == value || *end != '\0' || mib == 0) {
+			std::fprintf(stderr, "KYTY_MEMORY_BUDGET_MB: '%s' is not a positive number of MiB; ignored\n", value);
+			return UINT64_MAX;
+		}
+		return mib << 20u;
+	}();
+	return cap;
+}
+
+static std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> HeapSizeLimits(const GraphicContext& graphics) {
+	constexpr uint64_t DesktopReserve = 1536ull << 20u;
+	constexpr uint64_t LargeHeap      = 4ull << 30u;
+	std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> limits {};
+	limits.fill(VK_WHOLE_SIZE);
+	if (graphics.physical_device_properties.deviceType != vk::PhysicalDeviceType::eDiscreteGpu) {
+		return limits;
+	}
+	vk::PhysicalDeviceMemoryBudgetPropertiesEXT budgets {};
+	vk::PhysicalDeviceMemoryProperties2         memory {};
+	if (graphics.memory_budget_ext_enabled) {
+		memory.pNext = &budgets;
+	}
+	graphics.physical_device.getMemoryProperties2(&memory);
+	const auto& heaps = memory.memoryProperties;
+	for (uint32_t heap = 0; heap < heaps.memoryHeapCount; heap++) {
+		const uint64_t size = heaps.memoryHeaps[heap].size;
+		if (!(heaps.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) || size < LargeHeap) {
+			continue;
+		}
+		const uint64_t available = graphics.memory_budget_ext_enabled && budgets.heapBudget[heap] != 0
+		                               ? std::min<uint64_t>(budgets.heapBudget[heap], size)
+		                               : size;
+		const uint64_t forced = MemoryBudgetCap();
+		const uint64_t limit  = forced != UINT64_MAX ? std::min(forced, size)
+		                                             : std::max(available - std::min(available, DesktopReserve), size / 4);
+		limits[heap] = limit;
+		LOGF("Vulkan memory: device-local heap %u of %" PRIu64 " MiB limited to %" PRIu64 " MiB (%s)\n", heap,
+		     size >> 20u, limit >> 20u, forced != UINT64_MAX ? "KYTY_MEMORY_BUDGET_MB" : "budget less 1.5 GiB");
+	}
+	return limits;
+}
+
 bool GraphicContext::CreateAllocator() {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(instance == nullptr || physical_device == nullptr || device == nullptr ||
@@ -165,6 +216,8 @@ bool GraphicContext::CreateAllocator() {
 		info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
 	}
 	info.preferredLargeHeapBlockSize = 64ull * 1024 * 1024;
+	const auto heap_limits = HeapSizeLimits(*this);
+	info.pHeapSizeLimit    = heap_limits.data();
 
 	const auto result = static_cast<vk::Result>(vmaCreateAllocator(&info, &allocator));
 	if (result != vk::Result::eSuccess) {
@@ -236,23 +289,6 @@ uint32_t GraphicContext::GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> 
 		                                                 vk::MemoryHeapFlagBits::eDeviceLocal)};
 	}
 	return count;
-}
-
-static uint64_t MemoryBudgetCap() {
-	static const uint64_t cap = [] {
-		const char* value = std::getenv("KYTY_MEMORY_BUDGET_MB");
-		if (value == nullptr || value[0] == '\0') {
-			return UINT64_MAX;
-		}
-		char*      end = nullptr;
-		const auto mib = std::strtoull(value, &end, 10);
-		if (end == value || *end != '\0' || mib == 0) {
-			std::fprintf(stderr, "KYTY_MEMORY_BUDGET_MB: '%s' is not a positive number of MiB; ignored\n", value);
-			return UINT64_MAX;
-		}
-		return mib << 20u;
-	}();
-	return cap;
 }
 
 uint64_t GraphicContext::GetTotalMemoryBudget() const {
