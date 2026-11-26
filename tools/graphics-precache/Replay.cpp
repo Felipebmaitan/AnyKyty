@@ -1,5 +1,6 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/imageHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineManifest.h"
@@ -8,6 +9,7 @@
 #include "graphics/shader/shaderCompiler.h"
 #include "prx/libSceAgcDriver/KytyShim/src/Runtime.hpp"
 
+#include <bit>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -34,11 +36,34 @@ VKAPI_ATTR VkResult VKAPI_CALL VerifyLink(VkDevice device, VkPipelineCache cache
 	return lastResult;
 }
 
-template <typename Stage>
-void ApplyTraversalKey(Stage stage, std::vector<uint32_t>& words) {
-	if constexpr (requires { AppendNativeRayTracingKey(stage, words, true); }) {
-		AppendNativeRayTracingKey(stage, words, RayTracing::NativeTraversals());
+bool FitsDescriptorBudget(const GraphicContext& graphics, const PipelineLibraries::Stages& stages) {
+	using namespace ShaderRecompiler::IR;
+	const auto& limits = graphics.GetPhysicalDeviceProperties().limits;
+	uint64_t total_samplers = 0;
+	uint64_t total_images = 0;
+	for (const auto* stage: stages) {
+		if (stage == nullptr) continue;
+		const auto& bindings = stage->info.bindings;
+		const auto samplers = bindings.descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Samplers)];
+		total_samplers += samplers;
+		if (samplers > limits.maxPerStageDescriptorSamplers || total_samplers > limits.maxDescriptorSetSamplers) {
+			return false;
+		}
+		uint64_t images = 0;
+		uint64_t resources = 0;
+		for (auto mask = bindings.descriptor_mask; mask != 0; mask &= mask - 1u) {
+			const auto index = std::countr_zero(mask);
+			const auto kind = static_cast<DescriptorBindingKind>(index);
+			if (kind != DescriptorBindingKind::Samplers) resources += bindings.descriptor_counts[index];
+			if (ImageBindingResourceClass(kind) == ImageResourceClass::Sampled) images += bindings.descriptor_counts[index];
+		}
+		total_images += images;
+		if (images > limits.maxPerStageDescriptorSampledImages || total_images > limits.maxDescriptorSetSampledImages ||
+		    total_images > DescriptorHeap::MaxSampledImages || resources > limits.maxPerStageResources) {
+			return false;
+		}
 	}
+	return true;
 }
 
 }
@@ -60,12 +85,7 @@ struct PipelineCacheTestAccess {
 
 	static const ShaderModule* Find(PipelineCache& cache, ManifestModule record) {
 		cache.SetHostInput(record);
-		PipelineCache::ProgramKey key {.stage = record.stage, .hash = record.ProgramHash(),
-		                               .user_data_count = record.user_data_count};
-		std::visit([&](const auto& input) { BuildStageStaticKey(input, key.static_state); }, record.input);
-		ApplyTraversalKey(record.stage, key.static_state);
-		if (record.runtime_buffers) key.static_state.push_back(RuntimeBuffersKey);
-		if (record.runtime_samplers) key.static_state.push_back(RuntimeSamplersKey);
+		const auto key = PipelineCache::ManifestProgramKey(record, RayTracing::NativeTraversals());
 		cache.LockPrograms();
 		const auto* module = cache.FindCompiledModule(key, record.specialization, record.push_data_cursor);
 		cache.UnlockPrograms();
@@ -90,7 +110,7 @@ struct PipelineCacheTestAccess {
 				if (stages[j]) key.stage_ids[j] = stages[j]->id;
 				else complete = false;
 			}
-			if (!complete || !PipelineLibraries::Eligible(stages) || !cache.SampledDescriptorBudgetFits(stages)) {
+			if (!complete || !PipelineLibraries::Eligible(stages) || !FitsDescriptorBudget(graphics, stages)) {
 				std::printf("pipeline %zu ineligible\n", i);
 				continue;
 			}
