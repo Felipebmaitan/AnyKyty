@@ -36,6 +36,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <functional>
 #include <cstring>
 #include <deque>
@@ -1292,7 +1293,7 @@ bool ForEachUnrealShader(std::span<const uint8_t> archive, Found&& found) {
 }
 
 template <typename Read, typename Archive, typename Assets>
-bool ForEachUnrealEntry(uint64_t size, Read&& read, Archive&& archive, Assets&& assets) {
+bool ForEachUnrealEntry(uint64_t size, Read&& read, Archive&& archive, Assets&& assets, bool inventory) {
 	constexpr uint32_t   Magic    = 0x5A6F12E1u;
 	constexpr uint64_t   MaxAsset = 1u << 20u;
 	std::vector<uint8_t> data;
@@ -1331,24 +1332,32 @@ bool ForEachUnrealEntry(uint64_t size, Read&& read, Archive&& archive, Assets&& 
 	                       uint64_t blocks) {
 		std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		const bool is_archive = name.ends_with(".ushaderbytecode");
+		const bool is_manifest = inventory && name.ends_with(".kpm");
+		if (inventory && name.ends_with(".upipelinecache")) {
+			assets(name, {});
+			return;
+		}
 		const bool is_global  = name.ends_with(".bin");
 		const bool is_map     = name.ends_with(".umap");
 		const bool is_asset   = is_map || name.ends_with(".uexp") || name.ends_with(".uasset");
 		const uint64_t header = 8 + 8 + 8 + 4 + 20 + (method != 0 ? 4 + 16 * blocks : 0) + 1 + 4;
 		const bool     stored_archive = is_archive && method == 0;
-		const bool     readable_asset = (is_global || (is_asset && (method != 0 || is_map || length <= MaxAsset))) &&
+		const bool     readable_asset = (is_manifest || is_global || (is_asset && (method != 0 || is_map || length <= MaxAsset))) &&
 		                            (method == 0 || (method < zlib.size() && zlib[method]));
+		const uint64_t limit = is_manifest ? 64u << 20u : 256u << 20u;
 		if ((!stored_archive && !readable_asset) || offset > size || stored > size - offset ||
-		    header > size - offset - stored || length > (256u << 20u) || !read(offset, header + stored, entry_data)) {
+		    header > size - offset - stored || length > limit || !read(offset, header + stored, entry_data)) {
+			if (is_manifest) assets(name, {});
 			return;
 		}
 		SpanReader copy {entry_data, 8};
 		if (copy.Get<uint64_t>() != stored || copy.Get<uint64_t>() != length) {
+			if (is_manifest) assets(name, {});
 			return;
 		}
 		if (method == 0) {
 			const auto stored_data = std::span<const uint8_t>(entry_data).subspan(header);
-			is_archive ? archive(stored_data) : assets(stored_data);
+			is_archive ? archive(stored_data) : assets(name, stored_data);
 			return;
 		}
 		copy.Skip(4 + 20 + 4);
@@ -1369,7 +1378,8 @@ bool ForEachUnrealEntry(uint64_t size, Read&& read, Archive&& archive, Assets&& 
 			}
 			filled += static_cast<uint64_t>(out);
 		}
-		assets(std::span<const uint8_t>(inflated).first(filled));
+		assets(name, (is_manifest && filled != length) ? std::span<const uint8_t> {}
+		                                            : std::span<const uint8_t>(inflated).first(filled));
 	};
 	SpanReader index {data};
 	index.String();
@@ -2046,12 +2056,14 @@ struct ShaderScanStats {
 	uint32_t skipped_entries = 0;
 	uint32_t unresolved_containers = 0;
 	uint32_t unresolved_container_blocks = 0;
+	uint32_t raw_files = 0;
+	uint32_t foreign_pipeline_caches = 0;
 };
 
-template <typename Search, typename Stop, typename Known, typename Provided>
+template <typename Search, typename Stop, typename Known, typename Provided, typename Recipe>
 ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::stop_token& stop,
                                 Search&& search, Stop&& nothing_missing, Known&& known, Provided&& provided,
-                                bool exhaustive) {
+                                Recipe&& recipe, bool exhaustive) {
 	constexpr uint32_t SampleFiles = 32;
 	constexpr uint64_t SampleBytes = 256ull << 20u;
 	constexpr uint32_t Piece   = 64u << 20u;
@@ -2176,10 +2188,16 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 			const auto archive_entry = [&](std::span<const uint8_t> contents) {
 				if (!search_archive(contents)) stats.unresolved_container_blocks++;
 			};
-			return ForEachUnrealEntry(file.Size(), read, archive_entry, [&](std::span<const uint8_t> asset) {
-				search(asset);
-				FindCompressedShaders(asset, archive, [&](std::span<const uint8_t> shader) { search(shader); });
-			});
+			return ForEachUnrealEntry(file.Size(), read, archive_entry, [&](std::string_view name, std::span<const uint8_t> asset) {
+				if (exhaustive && name.ends_with(".kpm")) {
+					recipe(asset);
+				} else if (exhaustive && name.ends_with(".upipelinecache")) {
+					stats.foreign_pipeline_caches++;
+				} else {
+					search(asset);
+					FindCompressedShaders(asset, archive, [&](std::span<const uint8_t> shader) { search(shader); });
+				}
+			}, exhaustive);
 		}
 		if (!read(0, file.Size(), archive)) {
 			return false;
@@ -2425,6 +2443,10 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 			if (extension == ".bundle" || extension == ".unity3d" || extension == ".assets") {
 				search_unity(path);
 			}
+			if (exhaustive && extension == ".upipelinecache") {
+				stats.foreign_pipeline_caches++;
+				continue;
+			}
 			if (exhaustive) {
 				Common::File file;
 				if (!file.Open(path, Common::File::Mode::Read)) {
@@ -2433,6 +2455,12 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 				}
 				files++;
 				const auto size = file.Size();
+				if (extension == ".kpm") {
+					if (size <= Piece && read_file(file, 0, size, data)) recipe(data);
+					else stats.unresolved_containers++;
+					continue;
+				}
+				stats.raw_files++;
 				if (read_run(file, 0, size, 0, size, Piece, 0).end != size) stats.read_failures++;
 				continue;
 			}
@@ -2503,7 +2531,7 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 }
 
 bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_store,
-                          std::ostream& creation_records, std::ostream& report) {
+                          std::ostream& creation_records, std::ostream& shipped_recipes, std::ostream& report) {
 	code_store.write(reinterpret_cast<const char*>(&CodeStoreMagic), sizeof(CodeStoreMagic));
 	std::unordered_set<uint64_t> programs;
 	std::unordered_set<uint64_t> records;
@@ -2530,15 +2558,45 @@ bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_
 		});
 		return found;
 	};
+	PipelineManifest packaged;
+	uint32_t packaged_manifests = 0;
+	uint32_t invalid_manifests = 0;
+	uint32_t skipped_records = 0;
+	const auto recipe = [&](std::span<const uint8_t> bytes) {
+		PipelineManifest loaded;
+		uint32_t skipped = 0;
+		if (!LoadManifest(bytes, loaded, &skipped) || loaded.modules.size() > UINT32_MAX - packaged.modules.size()) {
+			invalid_manifests++;
+			return;
+		}
+		packaged_manifests++;
+		skipped_records += skipped;
+		const auto first = static_cast<uint32_t>(packaged.modules.size());
+		for (auto& pipeline: loaded.pipelines) {
+			for (auto& stage: pipeline.stages) {
+				if (stage != ManifestPipeline::NoStage) stage += first;
+			}
+		}
+		packaged.modules.insert(packaged.modules.end(), std::make_move_iterator(loaded.modules.begin()),
+		                        std::make_move_iterator(loaded.modules.end()));
+		packaged.pipelines.insert(packaged.pipelines.end(), loaded.pipelines.begin(), loaded.pipelines.end());
+		packaged.tessellation_layouts.insert(packaged.tessellation_layouts.end(), loaded.tessellation_layouts.begin(),
+		                                     loaded.tessellation_layouts.end());
+	};
 	const auto found_count = [&] { return programs.size(); };
 	const auto should_stop = [&] { return !code_store || !creation_records; };
-	const auto stats = ScanShaderFiles(root, {}, search, should_stop, found_count, found_count, true);
+	const auto stats = ScanShaderFiles(root, {}, search, should_stop, found_count, found_count, recipe, true);
+	const auto serialized = SaveManifest(packaged);
+	shipped_recipes.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
 	report << fmt::format("{{\"shader_programs\":{},\"creation_records\":{},\"files_read\":{},\"bytes_read\":{},"
 	                      "\"read_failures\":{},\"skipped_entries\":{},\"unresolved_containers\":{},"
-	                      "\"unresolved_container_blocks\":{}}}\n",
+	                      "\"unresolved_container_blocks\":{},\"raw_files\":{},\"foreign_pipeline_caches\":{},"
+	                      "\"packaged_manifests\":{},\"invalid_manifests\":{},\"skipped_packaged_records\":{}}}\n",
 	                      programs.size(), records.size(), stats.files, stats.bytes, stats.read_failures,
-	                      stats.skipped_entries, stats.unresolved_containers, stats.unresolved_container_blocks);
-	return code_store && creation_records && report;
+	                      stats.skipped_entries, stats.unresolved_containers, stats.unresolved_container_blocks,
+	                      stats.raw_files, stats.foreign_pipeline_caches, packaged_manifests, invalid_manifests,
+	                      skipped_records);
+	return code_store && creation_records && shipped_recipes && report;
 }
 
 bool PipelineCache::ScanGameFiles(const std::stop_token&                                          stop,
@@ -2602,7 +2660,8 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 		return !missing;
 	};
 	const auto stats = ScanShaderFiles(root, stop, search, nothing_missing,
-	                                  [&] { return found_listed.size(); }, [&] { return provided; }, false);
+	                                  [&] { return found_listed.size(); }, [&] { return provided; },
+	                                  [](std::span<const uint8_t>) {}, false);
 	ManifestLog("[ShaderScan] game files: {} shaders found ({} of {} listed by the manifest, {} new), {:.1f} s "
 	            "({} files, {:.0f} MB read)",
 	            found.size(), found_listed.size(), listed, provided,

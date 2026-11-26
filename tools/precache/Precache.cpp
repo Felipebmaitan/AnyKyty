@@ -150,17 +150,22 @@ int InventoryShaders(const char* assets, const char* destination) {
 	}
 	const auto code_path = output / "shaders.code";
 	const auto creation_path = output / "creation-records.bin";
+	const auto shipped_path = output / "shipped.kpm";
 	const auto report_path = output / "report.json";
 	std::ofstream code_store(code_path, std::ios::binary);
 	std::ofstream creation_records(creation_path, std::ios::binary);
+	std::ofstream shipped_recipes(shipped_path, std::ios::binary);
 	std::ofstream report(report_path);
-	const bool written = code_store && creation_records && report && WriteShaderInventory(root, code_store, creation_records, report);
+	const bool written = code_store && creation_records && shipped_recipes && report &&
+	                     WriteShaderInventory(root, code_store, creation_records, shipped_recipes, report);
 	code_store.close();
 	creation_records.close();
+	shipped_recipes.close();
 	report.close();
-	if (written && code_store && creation_records && report) return 0;
+	if (written && code_store && creation_records && shipped_recipes && report) return 0;
 	std::filesystem::remove(code_path, error);
 	std::filesystem::remove(creation_path, error);
+	std::filesystem::remove(shipped_path, error);
 	std::filesystem::remove(report_path, error);
 	std::filesystem::remove(output, error);
 	std::fprintf(stderr, "kyty_precache: failed to write shader inventory\n");

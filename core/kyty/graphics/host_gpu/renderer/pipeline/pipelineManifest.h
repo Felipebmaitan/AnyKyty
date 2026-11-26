@@ -71,7 +71,7 @@ struct PipelineManifest {
 };
 
 bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_store,
-                          std::ostream& creation_records, std::ostream& report);
+                          std::ostream& creation_records, std::ostream& shipped_recipes, std::ostream& report);
 
 void NormalizeManifestInput(ManifestModule& module);
 

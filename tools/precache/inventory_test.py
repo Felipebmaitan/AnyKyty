@@ -32,6 +32,15 @@ def create_archive(shader):
             + struct.pack('<2I', 0, 0) + compressed)
 
 
+def create_pak(name, payload):
+    name = name.encode() + b'\0'
+    entry = struct.pack('<3QI', 0, len(payload), len(payload), 0) + bytes(20) + struct.pack('<BI', 0, 0)
+    stored = entry + payload
+    index = struct.pack('<I', 1) + b'\0' + struct.pack('<2I', 1, len(name)) + name + entry
+    trailer = struct.pack('<2I2Q', 0x5A6F12E1, 3, len(stored), len(index)) + bytes(20)
+    return stored + index + trailer
+
+
 def run(binary, source):
     with tempfile.TemporaryDirectory() as directory:
         work = Path(directory)
@@ -43,12 +52,24 @@ def run(binary, source):
         (assets / 'duplicate.bin').write_bytes(shader[-64:])
         (assets / 'untyped.bin').write_bytes(struct.pack('<4I', 0xBF810000, 1, 0, 0) + footer())
         (assets / 'unreadable.ushaderbytecode').write_bytes(struct.pack('<I', 1))
+        kpm = b'# kyty pipeline manifest v1\n'
+        (assets / 'loose.kpm').write_bytes(kpm + b'M a cs code=0123456789abcdef t=8,4,1\n')
+        (assets / 'recipes.pak').write_bytes(create_pak('packed.kpm', kpm + b'M a cs code=1234567890abcdef t=4,8,1\n'))
+        (assets / 'invalid.kpm').write_bytes(b'other format\n')
+        (assets / 'cache.upipelinecache').touch()
         wrapper = source / 'tools/precache/precache'
         subprocess.run([sys.executable, wrapper, '--binary', binary, 'inventory', assets, output], check=True)
         counts = json.loads((output / 'report.json').read_text())
         assert counts['shader_programs'] == 2, counts
         assert counts['creation_records'] == 1, counts
         assert counts['unresolved_containers'] == 1, counts
+        assert counts['packaged_manifests'] == 2, counts
+        assert counts['invalid_manifests'] == 1, counts
+        assert counts['foreign_pipeline_caches'] == 1, counts
+        assert counts['skipped_packaged_records'] == 0, counts
+        marker, *shipped = (output / 'shipped.kpm').read_text().splitlines()
+        assert marker == '# kyty pipeline manifest v1'
+        assert {line.split()[3] for line in shipped} == {'code=0123456789abcdef', 'code=1234567890abcdef'}, shipped
         assert (output / 'creation-records.bin').read_bytes() == shader
         store = output / 'shaders.code'
         assert store.read_bytes().startswith(struct.pack('<Q', 0x3145444F4359544B))
