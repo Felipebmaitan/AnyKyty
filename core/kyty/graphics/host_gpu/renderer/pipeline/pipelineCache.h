@@ -783,6 +783,12 @@ private:
 		std::chrono::steady_clock::time_point hash_since;
 #endif
 	};
+	class GuestClockHold {
+	public:
+		GuestClockHold();
+		~GuestClockHold();
+		KYTY_CLASS_NO_COPY(GuestClockHold);
+	};
 	class StallScope {
 	public:
 		explicit StallScope(PipelineCache& cache);
@@ -795,6 +801,7 @@ private:
 
 	private:
 		PipelineCache& m_cache;
+		GuestClockHold m_clock_hold;
 #if defined(ANYPS5_KYTY)
 		std::chrono::steady_clock::time_point m_started;
 		const char*                           m_what = nullptr;

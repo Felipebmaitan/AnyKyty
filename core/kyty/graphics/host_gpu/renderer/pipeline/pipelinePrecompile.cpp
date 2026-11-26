@@ -17,6 +17,9 @@
 #include <optional>
 #include <utility>
 
+extern "C" void KernelPauseGuestClock_nid_no_patch();
+extern "C" void KernelResumeGuestClock_nid_no_patch();
+
 namespace Libs::Graphics {
 
 namespace {
@@ -48,6 +51,14 @@ struct Estimate {
 	uint64_t pipelines_created = 0;
 };
 
+}
+
+PipelineCache::GuestClockHold::GuestClockHold() {
+	KernelPauseGuestClock_nid_no_patch();
+}
+
+PipelineCache::GuestClockHold::~GuestClockHold() {
+	KernelResumeGuestClock_nid_no_patch();
 }
 
 PipelineCache::StallScope::StallScope(PipelineCache& cache): m_cache(cache) {

@@ -147,6 +147,8 @@ typedef struct KytyDllHost {
     uint64_t (*kernel_tsc_frequency)(void);
     uint64_t (*kernel_process_time)(void);
     uint64_t (*kernel_process_time_counter)(void);
+    void (*kernel_pause_guest_clock)(void);
+    void (*kernel_resume_guest_clock)(void);
     void (*run_report_set_gpu)(uint32_t vendor_id, const char* name, const char* driver, uint32_t api_version);
     void (*run_report_frame_presented)(void);
 
