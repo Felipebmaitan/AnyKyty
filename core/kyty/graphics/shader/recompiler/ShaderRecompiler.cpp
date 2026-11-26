@@ -888,23 +888,34 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 		IR::EliminateDeadCode(ir.blocks);
 	}
 
+	std::vector<IR::Block*> bounded_walks;
 	if (!options.rt_emulation) {
-		const auto bounds = IR::BoundEmptyWalks(ir, EmptyWalkIterations, EmptyWalkNativeIterations);
+		auto bounds = IR::BoundEmptyWalks(ir, EmptyWalkIterations, EmptyWalkNativeIterations);
 		if (bounds.empty + bounds.native + bounds.refused != 0) {
 			LOGF("ShaderRecompiler %s empty BVH walks bounded: hash=0x%016" PRIx64 " loops=%zu after %u iterations, %zu with "
 			     "native work after %u, %zu left unbounded\n",
 			     stage, ir.shader_hash, bounds.empty, EmptyWalkIterations, bounds.native, EmptyWalkNativeIterations,
 			     bounds.refused);
 		}
+		bounded_walks = std::move(bounds.headers);
 	}
 	if (ir.stage == ShaderType::Compute) {
-		const auto guards = IR::GuardComputeLoops(ir, ComputeLoopIterations);
+		const auto* group   = options.input_info.compute;
+		const auto  threads = group == nullptr ? 0u
+		                                       : std::max(group->threads_num[0], 1u) * std::max(group->threads_num[1], 1u) *
+		                                            std::max(group->threads_num[2], 1u);
+		const auto guards = IR::GuardComputeLoops(ir, ComputeLoopIterations, group == nullptr || threads > ir.wave_size,
+		                                          bounded_walks);
 		ir.loop_guards    = guards.guarded;
 		if (guards.unguarded != 0) {
 			LOGF("ShaderRecompiler %s loop guard: hash=0x%016" PRIx64 " %u loops guarded after %u iterations, %u left "
 			     "unguarded%s\n",
 			     stage, ir.shader_hash, guards.guarded, ComputeLoopIterations, guards.unguarded,
 			     ir.dispatcher_fallback ? " (unstructured dispatcher)" : "");
+			for (const auto& [block, reason]: guards.refusals) {
+				LOGF("ShaderRecompiler %s loop guard: hash=0x%016" PRIx64 " loop at block %u left unguarded: %s\n", stage,
+				     ir.shader_hash, block, reason);
+			}
 		}
 	}
 	IR::CollectShaderInfo(ir, options.input_info);

@@ -11,22 +11,23 @@ size_t BlockAt(const Program& program, const Block* block) {
 	return static_cast<size_t>(std::ranges::find(program.blocks, block) - program.blocks.begin());
 }
 
-bool LeaveAfter(Block& exit, Block& stay, Value next, uint32_t limit, bool mark) {
+bool LeaveAfter(Block& exit, Block& stay, Value done, uint32_t limit, bool mark) {
 	auto& term = exit.terminator;
 	if (exit.condition.IsEmpty() || term.kind != CFG::TerminatorKind::ConditionalBranch) return false;
 	const bool stay_on_true = term.true_block == &stay;
 	if (!stay_on_true && term.false_block != &stay) return false;
-	auto& under = *exit.PrependNewInst(exit.end(), ValueOpcode::ULessThan32, {next, Value(limit)});
+	const auto add = [&](ValueOpcode op, std::initializer_list<Value> args) {
+		return Value(&*exit.PrependNewInst(exit.end(), op, args));
+	};
+	const auto under = add(ValueOpcode::ULessThan32, {done, Value(limit)});
+	Value      over;
+	if (mark || !stay_on_true) over = add(ValueOpcode::LogicalNot, {under});
 	if (mark) {
-		exit.PrependNewInst(exit.end(), ValueOpcode::LoopGuardMark,
-		                    {Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalNot, {Value(&under)}))});
+		const auto stays = stay_on_true ? exit.condition : add(ValueOpcode::LogicalNot, {exit.condition});
+		add(ValueOpcode::LoopGuardMark, {add(ValueOpcode::LogicalAnd, {stays, over})});
 	}
-	if (stay_on_true) {
-		exit.condition = Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalAnd, {exit.condition, Value(&under)}));
-	} else {
-		auto& over     = *exit.PrependNewInst(exit.end(), ValueOpcode::LogicalNot, {Value(&under)});
-		exit.condition = Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalOr, {exit.condition, Value(&over)}));
-	}
+	exit.condition = stay_on_true ? add(ValueOpcode::LogicalAnd, {exit.condition, under})
+	                              : add(ValueOpcode::LogicalOr, {exit.condition, over});
 	return true;
 }
 
@@ -121,9 +122,67 @@ bool BodyValuesLeave(const Program& program, size_t first, size_t last, const Bl
 	return false;
 }
 
+bool DominatesLatch(const Program& program, const Block* block, const Block& header, const Block* latch, size_t first,
+                    size_t last) {
+	if (block == &header || block == latch) return true;
+	std::vector<bool>         seen(program.blocks.size());
+	std::vector<const Block*> stack {&header};
+	seen[first] = true;
+	while (!stack.empty()) {
+		const auto* at = stack.back();
+		stack.pop_back();
+		for (const auto* next: at->ImmSuccessors()) {
+			if (next == block || !InsideLoop(program, next, first, last)) continue;
+			if (next == latch) return false;
+			const auto index = BlockAt(program, next);
+			if (seen[index]) continue;
+			seen[index] = true;
+			stack.push_back(next);
+		}
+	}
+	return true;
 }
 
-bool GuardLoop(Program& program, Block& header, uint32_t limit, bool mark) {
+Value ExitValue(const Program& program, const Inst& phi, const Block& header, const Block* latch, size_t first, size_t last) {
+	Value common;
+	for (size_t index = 0; index < phi.NumArgs(); ++index) {
+		if (!InsideLoop(program, phi.PhiBlock(index), first, last)) return {};
+		const auto value = phi.Arg(index).Resolve();
+		if (index != 0 && !(value == common)) return {};
+		common = value;
+	}
+	if (common.IsEmpty() || common.IsImmediate()) return common;
+	const auto* inst = common.TryInstruction();
+	if (inst == nullptr || inst->Parent() == nullptr) return {};
+	if (!InsideLoop(program, inst->Parent(), first, last)) return common;
+	return DominatesLatch(program, inst->Parent(), header, latch, first, last) ? common : Value {};
+}
+
+bool HasBarrier(const Block& block) {
+	return std::ranges::any_of(block, [](const Inst& inst) { return inst.GetOpcode() == ValueOpcode::Barrier; });
+}
+
+bool ReachesBarrier(const Program& program, const Block& header) {
+	std::vector<bool>         seen(program.blocks.size());
+	std::vector<const Block*> stack {&header};
+	seen[BlockAt(program, &header)] = true;
+	while (!stack.empty()) {
+		const auto* at = stack.back();
+		stack.pop_back();
+		if (HasBarrier(*at)) return true;
+		for (const auto* next: at->ImmSuccessors()) {
+			const auto index = BlockAt(program, next);
+			if (index >= seen.size() || seen[index]) continue;
+			seen[index] = true;
+			stack.push_back(next);
+		}
+	}
+	return false;
+}
+
+}
+
+const char* GuardLoop(Program& program, Block& header, uint32_t limit, LoopExit mode) {
 	const auto first = BlockAt(program, &header);
 	const auto last  = BlockAt(program, header.terminator.continue_block);
 	auto*      merge = header.terminator.merge_block;
@@ -131,25 +190,30 @@ bool GuardLoop(Program& program, Block& header, uint32_t limit, bool mark) {
 	for (auto* pred: header.ImmPredecessors()) {
 		const auto at = BlockAt(program, pred);
 		if (at < first || at > last) continue;
-		if (latch != nullptr) return false;
+		if (latch != nullptr) return "several back edges";
 		latch = pred;
 	}
-	if (latch == nullptr || merge == nullptr || merge == &header) return false;
+	if (latch == nullptr || merge == nullptr || merge == &header) return "no back edge or no merge block";
 	auto&      term        = latch->terminator;
 	const bool conditional = term.kind == CFG::TerminatorKind::ConditionalBranch && !latch->condition.IsEmpty() &&
 	                         (term.true_block == &header || term.false_block == &header);
 	const bool plain       = term.kind == CFG::TerminatorKind::Branch && term.true_block == &header &&
 	                         std::ranges::find(latch->ImmSuccessors(), merge) == latch->ImmSuccessors().end();
-	if (!conditional && !plain) return false;
-	Block* exit = nullptr;
-	Block* stay = nullptr;
+	if (!conditional && !plain) return "back edge is neither conditional nor plain";
+	const bool mark      = mode == LoopExit::Guard;
+	const auto zero_exit = [&](const Inst& phi) { return mode == LoopExit::EmptyWalk || !phi.HasUses(); };
+	Block*     exit      = nullptr;
+	Block*     stay      = nullptr;
 	if (plain) {
 		exit = EveryIterationExit(program, header, latch, first, last, stay);
 		if (exit == nullptr) {
-			if (BodyValuesLeave(program, first, last, merge)) return false;
+			if (BodyValuesLeave(program, first, last, merge)) return "a value of the loop body is used after the loop";
 			for (const auto& inst: *merge) {
 				if (inst.GetOpcode() != ValueOpcode::Phi) break;
-				if (!ZeroAvailable(inst.GetType())) return false;
+				if (zero_exit(inst) ? !ZeroAvailable(inst.GetType())
+				                    : ExitValue(program, inst, header, latch, first, last).IsEmpty()) {
+					return "a merge value has no known value on a new exit edge";
+				}
 			}
 		}
 	}
@@ -160,11 +224,18 @@ bool GuardLoop(Program& program, Block& header, uint32_t limit, bool mark) {
 	for (auto* pred: header.ImmPredecessors()) {
 		count.AddPhiOperand(pred, pred == latch ? Value(&next) : Value(0u));
 	}
-	if (conditional) return LeaveAfter(*latch, header, Value(&next), limit, mark);
-	if (exit != nullptr) return LeaveAfter(*exit, *stay, Value(&next), limit, mark);
+	if (conditional) {
+		LeaveAfter(*latch, header, Value(&next), limit, mark);
+		return nullptr;
+	}
+	if (exit != nullptr) {
+		LeaveAfter(*exit, *stay, Value(&count), limit, mark);
+		return nullptr;
+	}
 	for (auto& inst: *merge) {
 		if (inst.GetOpcode() != ValueOpcode::Phi) break;
-		inst.AddPhiOperand(latch, ZeroOf(*latch, inst.GetType()));
+		inst.AddPhiOperand(latch, zero_exit(inst) ? ZeroOf(*latch, inst.GetType())
+		                                          : ExitValue(program, inst, header, latch, first, last));
 	}
 	auto& under = *latch->PrependNewInst(latch->end(), ValueOpcode::ULessThan32, {Value(&next), Value(limit)});
 	if (mark) {
@@ -176,22 +247,36 @@ bool GuardLoop(Program& program, Block& header, uint32_t limit, bool mark) {
 	term.true_block  = &header;
 	term.false_block = merge;
 	latch->AddBranch(merge);
-	return true;
+	return nullptr;
 }
 
-LoopGuards GuardComputeLoops(Program& program, uint32_t limit) {
+LoopGuards GuardComputeLoops(Program& program, uint32_t limit, bool several_waves, std::span<Block* const> bounded) {
 	LoopGuards guards;
 	if (program.dispatcher_fallback) {
 		guards.unguarded = 1;
 		return guards;
 	}
+	const bool rendezvous =
+	    several_waves && std::ranges::any_of(program.blocks, [](const Block* block) { return HasBarrier(*block); });
 	std::vector<Block*> headers;
 	for (auto* block: program.blocks) {
 		const auto& term = block->terminator;
 		if (term.loop_header && term.continue_block != nullptr && term.merge_block != nullptr) headers.push_back(block);
 	}
 	for (auto* header: headers) {
-		++(GuardLoop(program, *header, limit, true) ? guards.guarded : guards.unguarded);
+		if (std::ranges::find(bounded, header) != bounded.end()) {
+			++guards.bounded;
+			continue;
+		}
+		const char* refusal = rendezvous && ReachesBarrier(program, *header)
+		                          ? "a barrier shared by several waves can follow the loop exit"
+		                          : GuardLoop(program, *header, limit, LoopExit::Guard);
+		if (refusal == nullptr) {
+			++guards.guarded;
+			continue;
+		}
+		++guards.unguarded;
+		guards.refusals.emplace_back(header->id, refusal);
 	}
 	return guards;
 }

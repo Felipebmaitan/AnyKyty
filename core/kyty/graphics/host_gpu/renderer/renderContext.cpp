@@ -1119,11 +1119,11 @@ void RenderContext::RunGarbageCollector() {
 	m_frame_number++;
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
-		m_hack_marks_pending    = false;
+		m_hack_marks_pending    = true;
 		m_buffer_cache.ProcessFaultBuffer();
-	} else if (m_hack_marks_pending) {
+	}
+	if (m_hack_marks_pending && m_buffer_cache.ProcessHackMarks()) {
 		m_hack_marks_pending = false;
-		m_buffer_cache.ProcessHackMarks();
 	}
 	m_image_heap.RunGarbageCollector();
 	if (m_use_scan_countdown != 0) {

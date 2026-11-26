@@ -35,7 +35,7 @@ struct HackMarkNotice {
 };
 constexpr std::array<HackMarkNotice, static_cast<size_t>(HackMark::Count)> HackMarkNotices {{
     {"compute loop left by the loop guard", "ShaderRecompiler::GuardComputeLoops",
-     "lane exits after 1048576 iterations (the loop did not end on its own)"},
+     "guest lanes left a loop after 1048576 complete iterations while it would have gone on"},
 }};
 
 }
@@ -111,12 +111,11 @@ void FaultManager::ProcessFaultBuffer() {
 			}
 		});
 	});
-	ProcessHackMarks();
 }
 
-void FaultManager::ProcessHackMarks() {
+bool FaultManager::ProcessHackMarks() {
 	if (m_marks_tick != 0 || ++m_marks_countdown < HackMarksPeriod) {
-		return;
+		return false;
 	}
 	m_marks_countdown     = 0;
 	constexpr auto offset = BufferCache::HACK_MARKS_OFFSET;
@@ -188,6 +187,7 @@ void FaultManager::ProcessHackMarks() {
 		m_marks_tick = 0;
 	});
 	m_marks_tick = m_scheduler.CurrentTick();
+	return true;
 }
 
 void FaultManager::ProcessWriteBuffer(PagesHandler&& handler) {

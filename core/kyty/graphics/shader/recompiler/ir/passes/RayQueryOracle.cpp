@@ -202,8 +202,9 @@ EmptyWalkBounds BoundEmptyWalks(Program& program, uint32_t limit, uint32_t nativ
 		for (auto at = first; at <= last && !native; ++at) {
 			native = std::ranges::any_of(*program.blocks[at], NativeWork);
 		}
-		if (GuardLoop(program, *header, native ? native_limit : limit, false)) {
+		if (GuardLoop(program, *header, native ? native_limit : limit, LoopExit::EmptyWalk) == nullptr) {
 			++(native ? bounds.native : bounds.empty);
+			bounds.headers.push_back(header);
 		} else {
 			++bounds.refused;
 		}

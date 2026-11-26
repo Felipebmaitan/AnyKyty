@@ -204,7 +204,7 @@ public:
 	[[nodiscard]] StreamBuffer& GetTableUploadBuffer();
 	void               PrepareFaultBuffer() { m_fault_manager.PrepareFaultBuffer(); }
 	void               ProcessFaultBuffer();
-	void               ProcessHackMarks() { m_fault_manager.ProcessHackMarkBuffer(); }
+	bool               ProcessHackMarks() { return m_fault_manager.ProcessHackMarkBuffer(); }
 	void               ProcessUseBuffer();
 	void ProcessWriteBuffer(FaultManager::PagesHandler&& handler) {
 		m_fault_manager.ProcessWriteBuffer(std::move(handler));

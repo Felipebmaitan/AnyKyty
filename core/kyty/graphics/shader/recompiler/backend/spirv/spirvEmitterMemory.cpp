@@ -1933,9 +1933,17 @@ void DefineIndirectBufferLoads(ValueEmitContext& ctx) {
 void EmitLoopGuardMark(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	if (state.fault_buffer_variable == 0 || (ctx.other_half != nullptr && ctx.half != 0)) return;
-	EmitIfCondition(state, ctx.Arg(inst, 0), [&] {
-		EmitRayMarkCount(state, BufferCache::HACK_MARK_COUNTS + static_cast<uint32_t>(HackMark::LoopGuard),
-		                 ConstantU32(state, 1));
+	const auto one   = ConstantU32(state, 1);
+	const auto zero  = ConstantU32(state, 0);
+	auto       left  = ctx.Arg(inst, 0);
+	auto       lanes = Select(state, TypeU32(state), left, one, zero);
+	if (ctx.other_half != nullptr) {
+		const auto other = ctx.other_half->Arg(inst, 0);
+		lanes = Binary(state, spv::OpIAdd, TypeU32(state), lanes, Select(state, TypeU32(state), other, one, zero));
+		left  = Binary(state, spv::OpLogicalOr, TypeBool(state), left, other);
+	}
+	EmitIfCondition(state, left, [&] {
+		EmitRayMarkCount(state, BufferCache::HACK_MARK_COUNTS + static_cast<uint32_t>(HackMark::LoopGuard), lanes);
 	});
 }
 
