@@ -265,6 +265,7 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 	};
 #if defined(ANYPS5_KYTY)
 	Clock::time_point stats_logged = Clock::now();
+	Clock::time_point shader_wait_logged;
 #endif
 	while (!stop.stop_requested()) {
 		sleep(WatchPeriod);
@@ -281,6 +282,14 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 		const auto stall = GetPipelineStall();
 		const auto now   = Clock::now();
 		const auto left  = std::max(e.pending, stall.threads);
+#if defined(ANYPS5_KYTY)
+		if (stall.hash != 0 && stall.hash_since != shader_wait_logged && now - stall.hash_since >= StallShown) {
+			shader_wait_logged = stall.hash_since;
+			PrecompileLog("[kyty-gpl] waiting_shader shader={:016x} elapsed_s={:.1f} monotonic_ns={}",
+			              stall.hash, seconds(now - stall.hash_since),
+			              std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+		}
+#endif
 		const auto creations = GetDriverCreations(SlowSeconds);
 		const bool waits_slow = stall.threads != 0 && now - stall.since >= std::chrono::duration<double>(SlowSeconds);
 		const uint32_t slow = creations.slow;
