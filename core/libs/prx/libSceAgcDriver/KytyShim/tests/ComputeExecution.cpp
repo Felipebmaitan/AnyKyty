@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderBindings.h"
@@ -261,7 +262,7 @@ bool Run(const Gpu& gpu, const Dispatch& dispatch) {
 	Require(layout.UsesPushData(), what + ": the shader data does not fit the push constants");
 	for (auto mask = layout.descriptor_mask; mask != 0; mask &= mask - 1u) {
 		const auto kind = static_cast<BindingKind>(std::countr_zero(mask));
-		Require(kind == BindingKind::Buffers, what + ": descriptor binding kind " +
+		Require(kind == BindingKind::Buffers || kind == BindingKind::FaultBuffer, what + ": descriptor binding kind " +
 		                                          std::to_string(static_cast<uint32_t>(kind)) + " is not served by this test");
 	}
 
@@ -309,6 +310,14 @@ bool Run(const Gpu& gpu, const Dispatch& dispatch) {
 		set_bindings.push_back({Recompiler::IR::NativeBinding(ShaderType::Compute, BindingKind::Buffers),
 		                        vk::DescriptorType::eStorageBuffer, buffer_count, vk::ShaderStageFlagBits::eCompute, nullptr});
 	}
+	const bool fault_buffer = layout.descriptor_counts[static_cast<size_t>(BindingKind::FaultBuffer)] != 0;
+	HostBuffer marks;
+	if (fault_buffer) {
+		marks = CreateHostBuffer(gpu, BufferCache::FAULT_BUFFER_SIZE);
+		std::memset(marks.mapped, 0, marks.bytes);
+		set_bindings.push_back({Recompiler::IR::NativeBinding(ShaderType::Compute, BindingKind::FaultBuffer),
+		                        vk::DescriptorType::eStorageBuffer, 1u, vk::ShaderStageFlagBits::eCompute, nullptr});
+	}
 	vk::DescriptorSetLayoutCreateInfo set_layout_info;
 	set_layout_info.bindingCount = static_cast<uint32_t>(set_bindings.size());
 	set_layout_info.pBindings    = set_bindings.data();
@@ -337,7 +346,7 @@ bool Run(const Gpu& gpu, const Dispatch& dispatch) {
 	vk::Pipeline pipeline;
 	Checked(gpu.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &pipeline), "pipeline creation");
 
-	const vk::DescriptorPoolSize pool_size {vk::DescriptorType::eStorageBuffer, std::max(buffer_count, 1u)};
+	const vk::DescriptorPoolSize pool_size {vk::DescriptorType::eStorageBuffer, std::max(buffer_count + (fault_buffer ? 1u : 0u), 1u)};
 	vk::DescriptorPoolCreateInfo pool_info;
 	pool_info.maxSets       = 1;
 	pool_info.poolSizeCount = 1;
@@ -358,6 +367,16 @@ bool Run(const Gpu& gpu, const Dispatch& dispatch) {
 		write.descriptorCount = buffer_count;
 		write.descriptorType  = vk::DescriptorType::eStorageBuffer;
 		write.pBufferInfo     = buffer_infos.data();
+		gpu.device.updateDescriptorSets(1, &write, 0, nullptr);
+	}
+	if (fault_buffer) {
+		const vk::DescriptorBufferInfo marks_info {marks.buffer, 0u, VK_WHOLE_SIZE};
+		vk::WriteDescriptorSet         write;
+		write.dstSet          = set;
+		write.dstBinding      = set_bindings.back().binding;
+		write.descriptorCount = 1;
+		write.descriptorType  = vk::DescriptorType::eStorageBuffer;
+		write.pBufferInfo     = &marks_info;
 		gpu.device.updateDescriptorSets(1, &write, 0, nullptr);
 	}
 
@@ -392,6 +411,14 @@ bool Run(const Gpu& gpu, const Dispatch& dispatch) {
 	for (uint32_t index = 0; index < buffer_count; index++) {
 		if (written[index]) std::memcpy(targets[index], buffers[index].mapped, buffers[index].bytes);
 		DestroyHostBuffer(gpu, buffers[index]);
+	}
+	if (fault_buffer) {
+		const auto* words = static_cast<const uint32_t*>(marks.mapped);
+		const auto  entry = BufferCache::HACK_MARKS_OFFSET / sizeof(uint32_t) +
+		                   uint64_t {BufferCache::HackMarkEntry(info.shader_hash)} * BufferCache::HACK_MARK_DWORDS;
+		Require(words[entry + BufferCache::HACK_MARK_COUNTS + static_cast<uint32_t>(HackMark::LoopGuard)] == 0u,
+		        what + ": the loop guard stopped a loop that ends on its own");
+		DestroyHostBuffer(gpu, marks);
 	}
 	gpu.device.destroyCommandPool(command_pool);
 	gpu.device.destroyDescriptorPool(pool);

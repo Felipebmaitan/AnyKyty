@@ -108,6 +108,7 @@ public:
 	bool               CacheSelfSizedBuffers(const ShaderStageRuntime& runtime);
 	[[nodiscard]] bool SynchronizeDmaFootprint(std::span<const ShaderStageRuntime* const> stages);
 	void               PrepareBda(bool may_write, bool full_sync = true);
+	void               PrepareHackMarks();
 	void               RunGarbageCollector();
 	void NoteHleTlas(uint64_t header, uint64_t size, std::vector<uint64_t> blases);
 	void ForgetHleTlas(uint64_t header);
@@ -203,6 +204,7 @@ private:
 	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;
+	bool                      m_hack_marks_pending    = false;
 	bool                      m_use_scan_pending      = false;
 	uint32_t                  m_use_scan_countdown    = 0;
 

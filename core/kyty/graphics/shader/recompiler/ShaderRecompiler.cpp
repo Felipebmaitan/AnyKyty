@@ -15,6 +15,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
+#include "graphics/shader/recompiler/ir/passes/LoopGuard.h"
 #include "graphics/shader/recompiler/ir/passes/RayQueryOracle.h"
 #include "graphics/shader/recompiler/ir/passes/RayQueryResults.h"
 #include "graphics/shader/recompiler/ir/passes/RayQueryTraversal.h"
@@ -46,6 +47,7 @@ namespace {
 
 constexpr uint32_t EmptyWalkIterations       = 4096;
 constexpr uint32_t EmptyWalkNativeIterations = 65536;
+constexpr uint32_t ComputeLoopIterations     = 1u << 20u;
 
 std::string MakeIrDump(std::string_view cfg, const IR::Program& ir) {
 	std::string dump = "CFG:\n";
@@ -893,6 +895,16 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 			     "native work after %u, %zu left unbounded\n",
 			     stage, ir.shader_hash, bounds.empty, EmptyWalkIterations, bounds.native, EmptyWalkNativeIterations,
 			     bounds.refused);
+		}
+	}
+	if (ir.stage == ShaderType::Compute) {
+		const auto guards = IR::GuardComputeLoops(ir, ComputeLoopIterations);
+		ir.loop_guards    = guards.guarded;
+		if (guards.unguarded != 0) {
+			LOGF("ShaderRecompiler %s loop guard: hash=0x%016" PRIx64 " %u loops guarded after %u iterations, %u left "
+			     "unguarded%s\n",
+			     stage, ir.shader_hash, guards.guarded, ComputeLoopIterations, guards.unguarded,
+			     ir.dispatcher_fallback ? " (unstructured dispatcher)" : "");
 		}
 	}
 	IR::CollectShaderInfo(ir, options.input_info);

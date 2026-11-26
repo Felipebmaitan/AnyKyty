@@ -27,6 +27,7 @@ public:
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return &m_fault_buffer; }
 	void                  PrepareFaultBuffer();
 	void                  ProcessFaultBuffer();
+	void                  ProcessHackMarkBuffer() { ProcessHackMarks(); }
 	void                  ProcessWriteBuffer(PagesHandler&& handler);
 	void                  ProcessUseBuffer(PagesHandler&& handler);
 

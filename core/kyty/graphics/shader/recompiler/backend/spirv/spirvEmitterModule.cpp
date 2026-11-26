@@ -381,7 +381,7 @@ void DefineDescriptors(EmitterState& state) {
 	counts[static_cast<size_t>(Kind::SharedMemory)] =
 	    info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer;
 	counts[static_cast<size_t>(Kind::BdaPagetable)] = info.uses_dma;
-	counts[static_cast<size_t>(Kind::FaultBuffer)] = info.uses_dma;
+	counts[static_cast<size_t>(Kind::FaultBuffer)] = info.uses_dma || state.program.loop_guards != 0;
 	counts[static_cast<size_t>(Kind::FlattenedSrt)] = info.uses_flattened_srt && !table;
 	bindings.flattened_srt_uniform =
 	    counts[static_cast<size_t>(Kind::FlattenedSrt)] != 0 && FlattenedSrtFitsUniform(state.program);

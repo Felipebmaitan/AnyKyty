@@ -33,7 +33,10 @@ struct HackMarkNotice {
 	const char* site;
 	const char* what;
 };
-constexpr std::array<HackMarkNotice, static_cast<size_t>(HackMark::Count)> HackMarkNotices {};
+constexpr std::array<HackMarkNotice, static_cast<size_t>(HackMark::Count)> HackMarkNotices {{
+    {"compute loop left by the loop guard", "ShaderRecompiler::GuardComputeLoops",
+     "lane exits after 1048576 iterations (the loop did not end on its own)"},
+}};
 
 }
 

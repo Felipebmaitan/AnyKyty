@@ -36,6 +36,7 @@ using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
 
 enum class HackMark : uint32_t {
+	LoopGuard,
 	Count,
 };
 
@@ -203,6 +204,7 @@ public:
 	[[nodiscard]] StreamBuffer& GetTableUploadBuffer();
 	void               PrepareFaultBuffer() { m_fault_manager.PrepareFaultBuffer(); }
 	void               ProcessFaultBuffer();
+	void               ProcessHackMarks() { m_fault_manager.ProcessHackMarkBuffer(); }
 	void               ProcessUseBuffer();
 	void ProcessWriteBuffer(FaultManager::PagesHandler&& handler) {
 		m_fault_manager.ProcessWriteBuffer(std::move(handler));

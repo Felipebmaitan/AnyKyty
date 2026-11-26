@@ -560,6 +560,10 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		FindBuffers(std::span {&descriptor_stage, 1u});
 		const bool indirect_writes = PrepareIndirectWriteTargets(m_context, bindings) |
 		                             PrepareSelfSizedBuffers(m_context, input_info.stage);
+		if (!program.info.uses_dma &&
+		    program.bindings.descriptor_counts[static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::FaultBuffer)] != 0) {
+			m_context.PrepareHackMarks();
+		}
 		if (program.info.uses_dma) {
 			m_context.CacheDmaBases(input_info.stage);
 			const ShaderStageRuntime* const dma_stage = &input_info.stage;
@@ -823,6 +827,10 @@ void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t arg
 	PreparedBindings* descriptor_stage = &bindings;
 	FindBuffers(std::span {&descriptor_stage, 1u});
 	const bool self_sized_writes = PrepareSelfSizedBuffers(m_context, input_info.stage);
+	if (!program.info.uses_dma &&
+	    program.bindings.descriptor_counts[static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::FaultBuffer)] != 0) {
+		m_context.PrepareHackMarks();
+	}
 	if (program.info.uses_dma) {
 		m_context.CacheDmaBases(input_info.stage);
 		const ShaderStageRuntime* const dma_stage = &input_info.stage;
@@ -983,6 +991,10 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		const auto& program = input_info.stage.module->info;
 		const bool indirect_writes = PrepareIndirectWriteTargets(m_context, bindings) |
 		                             PrepareSelfSizedBuffers(m_context, input_info.stage);
+		if (!program.info.uses_dma &&
+		    program.bindings.descriptor_counts[static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::FaultBuffer)] != 0) {
+			m_context.PrepareHackMarks();
+		}
 		if (program.info.uses_dma) {
 			m_context.CacheDmaBases(input_info.stage);
 			const ShaderStageRuntime* const dma_stage = &input_info.stage;

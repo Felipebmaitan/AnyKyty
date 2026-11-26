@@ -1110,11 +1110,20 @@ void RenderContext::PrepareBda(bool may_write, bool full_sync) {
 	m_use_scan_pending      = true;
 }
 
+void RenderContext::PrepareHackMarks() {
+	m_buffer_cache.PrepareFaultBuffer();
+	m_hack_marks_pending = true;
+}
+
 void RenderContext::RunGarbageCollector() {
 	m_frame_number++;
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
+		m_hack_marks_pending    = false;
 		m_buffer_cache.ProcessFaultBuffer();
+	} else if (m_hack_marks_pending) {
+		m_hack_marks_pending = false;
+		m_buffer_cache.ProcessHackMarks();
 	}
 	m_image_heap.RunGarbageCollector();
 	if (m_use_scan_countdown != 0) {

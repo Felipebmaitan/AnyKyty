@@ -980,6 +980,7 @@ struct Program: ResourcePlan {
 	uint32_t                      scratch_dwords = 0;
 	uint32_t                      relative_vgpr_dwords = 0;
 	bool                          dispatcher_fallback = false;
+	uint32_t                      loop_guards = 0;
 	std::vector<uint32_t>         inlined_call_entries;
 	struct ScalarWrite { uint32_t pc; ScalarReg reg; Value value; };
 	std::vector<ScalarWrite>      scalar_writes;

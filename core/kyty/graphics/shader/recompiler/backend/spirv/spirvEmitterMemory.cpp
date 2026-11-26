@@ -1930,12 +1930,21 @@ void DefineIndirectBufferLoads(ValueEmitContext& ctx) {
 	}
 }
 
+void EmitLoopGuardMark(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto& state = ctx.state;
+	if (state.fault_buffer_variable == 0 || (ctx.other_half != nullptr && ctx.half != 0)) return;
+	EmitIfCondition(state, ctx.Arg(inst, 0), [&] {
+		EmitRayMarkCount(state, BufferCache::HACK_MARK_COUNTS + static_cast<uint32_t>(HackMark::LoopGuard),
+		                 ConstantU32(state, 1));
+	});
+}
+
 void EmitGuestRayCount(EmitterState& state, uint32_t count) {
 	EmitRayMarkCount(state, BufferCache::HACK_MARK_GUEST_RAYS, count);
 }
 
 void EmitRayMarkCount(EmitterState& state, uint32_t counter, uint32_t count) {
-	EXIT_IF(state.fault_buffer_variable == 0 || counter < BufferCache::HACK_MARK_GUEST_RAYS ||
+	EXIT_IF(state.fault_buffer_variable == 0 || counter < BufferCache::HACK_MARK_COUNTS ||
 	        counter >= BufferCache::HACK_MARK_DWORDS);
 	const auto hash  = state.program.shader_hash;
 	const auto first = BufferCache::HACK_MARKS_OFFSET / sizeof(uint32_t) +

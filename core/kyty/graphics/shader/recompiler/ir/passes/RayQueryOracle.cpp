@@ -1,5 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/RayQueryOracle.h"
 
+#include "graphics/shader/recompiler/ir/passes/LoopGuard.h"
+
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/RayQuery.h"
 
@@ -146,107 +148,6 @@ Block* InnermostLoop(const Program& program, const Block* block) {
 	return nullptr;
 }
 
-bool LeaveAfter(Block& exit, Block& stay, Value next, uint32_t limit) {
-	auto& term = exit.terminator;
-	if (exit.condition.IsEmpty() || term.kind != CFG::TerminatorKind::ConditionalBranch) return false;
-	const bool stay_on_true = term.true_block == &stay;
-	if (!stay_on_true && term.false_block != &stay) return false;
-	auto& under = *exit.PrependNewInst(exit.end(), ValueOpcode::ULessThan32, {next, Value(limit)});
-	if (stay_on_true) {
-		exit.condition = Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalAnd, {exit.condition, Value(&under)}));
-	} else {
-		auto& over     = *exit.PrependNewInst(exit.end(), ValueOpcode::LogicalNot, {Value(&under)});
-		exit.condition = Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalOr, {exit.condition, Value(&over)}));
-	}
-	return true;
-}
-
-bool ZeroAvailable(Type type) {
-	switch (type) {
-		case Type::U1:
-		case Type::U8:
-		case Type::U16:
-		case Type::U32:
-		case Type::U64:
-		case Type::F16:
-		case Type::F32:
-		case Type::F64:
-		case Type::U32x2:
-		case Type::U32x3:
-		case Type::U32x4:
-		case Type::F32x2: return true;
-		default: return false;
-	}
-}
-
-Value ZeroOf(Block& block, Type type) {
-	const auto at = [&](ValueOpcode op, std::initializer_list<Value> args) {
-		return Value(&*block.PrependNewInst(block.end(), op, args));
-	};
-	switch (type) {
-		case Type::U1: return Value(false);
-		case Type::U8: return Value(uint8_t {0});
-		case Type::U16: return Value(uint16_t {0});
-		case Type::U32: return Value(0u);
-		case Type::U64: return Value(uint64_t {0});
-		case Type::F16: return at(ValueOpcode::BitCastF16U16, {Value(uint16_t {0})});
-		case Type::F32: return at(ValueOpcode::BitCastF32U32, {Value(0u)});
-		case Type::F64: return at(ValueOpcode::BitCastF64U64, {Value(uint64_t {0})});
-		case Type::U32x2: return at(ValueOpcode::CompositeConstructU32x2, {Value(0u), Value(0u)});
-		case Type::U32x3: return at(ValueOpcode::CompositeConstructU32x3, {Value(0u), Value(0u), Value(0u)});
-		case Type::U32x4: return at(ValueOpcode::CompositeConstructU32x4, {Value(0u), Value(0u), Value(0u), Value(0u)});
-		case Type::F32x2: {
-			const auto zero = at(ValueOpcode::BitCastF32U32, {Value(0u)});
-			return at(ValueOpcode::CompositeConstructF32x2, {zero, zero});
-		}
-		default: return {};
-	}
-}
-
-bool BoundLoop(Program& program, Block& header, uint32_t limit) {
-	const auto first = BlockAt(program, &header);
-	const auto last  = BlockAt(program, header.terminator.continue_block);
-	auto*      merge = header.terminator.merge_block;
-	Block*     latch = nullptr;
-	for (auto* pred: header.ImmPredecessors()) {
-		const auto at = BlockAt(program, pred);
-		if (at < first || at > last) continue;
-		if (latch != nullptr) return false;
-		latch = pred;
-	}
-	if (latch == nullptr || merge == nullptr || merge == &header) return false;
-	auto&      term        = latch->terminator;
-	const bool conditional = term.kind == CFG::TerminatorKind::ConditionalBranch && !latch->condition.IsEmpty() &&
-	                         (term.true_block == &header || term.false_block == &header);
-	const bool plain       = term.kind == CFG::TerminatorKind::Branch && term.true_block == &header &&
-	                         std::ranges::find(latch->ImmSuccessors(), merge) == latch->ImmSuccessors().end();
-	if (!conditional && !plain) return false;
-	if (plain) {
-		for (const auto& inst: *merge) {
-			if (inst.GetOpcode() != ValueOpcode::Phi) break;
-			if (!ZeroAvailable(inst.GetType())) return false;
-		}
-	}
-	auto& count = *header.PrependNewInst(header.begin(), ValueOpcode::Phi);
-	count.SetFlags(Type::U32);
-	const auto body = std::ranges::find_if(header, [](const Inst& inst) { return inst.GetOpcode() != ValueOpcode::Phi; });
-	auto&      next = *header.PrependNewInst(body, ValueOpcode::IAdd32, {Value(&count), Value(1u)});
-	for (auto* pred: header.ImmPredecessors()) {
-		count.AddPhiOperand(pred, pred == latch ? Value(&next) : Value(0u));
-	}
-	if (conditional) return LeaveAfter(*latch, header, Value(&next), limit);
-	for (auto& inst: *merge) {
-		if (inst.GetOpcode() != ValueOpcode::Phi) break;
-		inst.AddPhiOperand(latch, ZeroOf(*latch, inst.GetType()));
-	}
-	latch->condition = Value(&*latch->PrependNewInst(latch->end(), ValueOpcode::ULessThan32, {Value(&next), Value(limit)}));
-	term.kind        = CFG::TerminatorKind::ConditionalBranch;
-	term.true_block  = &header;
-	term.false_block = merge;
-	latch->AddBranch(merge);
-	return true;
-}
-
 bool Unserved(const Inst& inst) {
 	const auto op = inst.GetOpcode();
 	if (op == ValueOpcode::Bvh8Intersect) return (inst.Flags<uint32_t>() & BvhIntersectEmpty) != 0;
@@ -301,7 +202,7 @@ EmptyWalkBounds BoundEmptyWalks(Program& program, uint32_t limit, uint32_t nativ
 		for (auto at = first; at <= last && !native; ++at) {
 			native = std::ranges::any_of(*program.blocks[at], NativeWork);
 		}
-		if (BoundLoop(program, *header, native ? native_limit : limit)) {
+		if (GuardLoop(program, *header, native ? native_limit : limit, false)) {
 			++(native ? bounds.native : bounds.empty);
 		} else {
 			++bounds.refused;

@@ -610,6 +610,8 @@ code is 0 when the survey ran, 2 when the cache cannot be read and 64 for a wron
 [`tools/rt_survey.py`](../../tools/rt_survey.py) runs the probe and writes the report that players attach to the survey issue; see
 [the ray tracing survey](../user/ANYKYTY.md#ray-tracing-survey).
 
+Compute loop guard (always on, no setting): every structured loop of a compute program gets an iteration counter on its back edge, and a lane leaves the loop after 1048576 iterations. An unconditional back edge leaves through the first exit reached on every iteration, or becomes a conditional branch to the loop merge when no value of the loop body is used after the loop (the merge values get a zero of their type on that edge); other loops, and programs that fall back to the unstructured dispatcher, stay unguarded and the compile log counts them (`loop guard: ... left unguarded`). A lane that reaches the limit adds to the program's entry in the hack marks of the fault buffer, which the program then binds, and the periodic readback writes one `[HACK] compute loop left by the loop guard` line per shader with the count of lane exits. The limit is far above any loop that ends on its own; it stops loops that run on data an earlier, skipped or broken step never wrote, which otherwise hold the GPU until the driver resets it (NVIDIA Xid 109).
+
 Fallbacks instead of stops (`KYTY_FALLBACKS`, on by default on Linux, off by default on Windows): KytyPS5 stops the emulator (`EXIT`, `EXIT_IF`,
 `EXIT_NOT_IMPLEMENTED`) on anything it does not handle. Where the stop concerns one draw or one dispatch and nothing else
 depends on it, the build skips that draw or dispatch instead and writes one `[HACK]` line the first time per shader,
