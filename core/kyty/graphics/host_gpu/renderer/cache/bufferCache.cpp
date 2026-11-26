@@ -2557,6 +2557,33 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 	if (m_graphics.readback_queue.submit(1, &submit, m_readback.fence) != vk::Result::eSuccess) {
 		EXIT("BufferCache: readback queue submission failed\n");
 	}
+#if defined(ANYPS5_KYTY)
+	constexpr auto     SpinLimit = std::chrono::seconds(10);
+	constexpr uint64_t StallNs   = 10'000'000'000ull;
+	const auto         spin_from = std::chrono::steady_clock::now();
+	for (uint32_t spins = 0;; ++spins) {
+		const auto status = device.getFenceStatus(m_readback.fence);
+		if (status == vk::Result::eSuccess) {
+			break;
+		}
+		if (status != vk::Result::eNotReady) {
+			EXIT("BufferCache: readback queue wait failed: %s\n", vk::to_string(status).c_str());
+		}
+		if ((spins & 1023u) == 1023u && std::chrono::steady_clock::now() - spin_from >= SpinLimit) {
+			m_scheduler.GetMasterSemaphore().ReportStall(needed);
+			auto result = device.waitForFences(1, &m_readback.fence, VK_TRUE, StallNs);
+			while (result == vk::Result::eTimeout) {
+				m_scheduler.GetMasterSemaphore().ReportStall(needed);
+				result = device.waitForFences(1, &m_readback.fence, VK_TRUE, StallNs);
+			}
+			if (result != vk::Result::eSuccess) {
+				EXIT("BufferCache: readback queue wait failed: %s\n", vk::to_string(result).c_str());
+			}
+			break;
+		}
+		Common::SpinPause();
+	}
+#else
 	for (;;) {
 		const auto status = device.getFenceStatus(m_readback.fence);
 		if (status == vk::Result::eSuccess) {
@@ -2567,6 +2594,7 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 		}
 		Common::SpinPause();
 	}
+#endif
 	(void)device.resetFences(1, &m_readback.fence);
 	m_scheduler.WaitPriorityOperations(needed);
 	staging.Invalidate(0, total_size);

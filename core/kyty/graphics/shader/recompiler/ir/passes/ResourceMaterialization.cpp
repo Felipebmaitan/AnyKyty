@@ -2250,7 +2250,13 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	plan.uniform_fill.element_count = Clone(plan.uniform_fill.element_count);
 	plan.capture_specialization_reads |=
 	    capture_indirect_reads || capture_control_reads || !plan.source_reads.empty();
-	if (capture_indirect_reads || !plan.source_reads.empty())
+	const bool scalar_compute_tables =
+	    program.stage == ShaderType::Compute && plan.source_reads.empty() &&
+	    std::ranges::all_of(plan.descriptor_sources, [](const DescriptorSource& source) {
+		    const auto& indirect = source.indirect_descriptor;
+		    return !indirect || (indirect->table_scalar && !indirect->selector && !indirect->pointer_table);
+	    });
+	if ((capture_indirect_reads || !plan.source_reads.empty()) && !scalar_compute_tables)
 		plan.resource_tracking_complete &= !program.has_address_writes;
 	DerivePlanState(plan);
 	return plan;
