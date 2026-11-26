@@ -205,8 +205,9 @@ def driver(args, binary):
             env[key] = os.environ[key]
     if args.four_job_marker:
         env['KYTY_PRECACHE_FOUR_JOB_MARKER'] = str(args.four_job_marker.resolve())
-    env.update(KYTY_PRECACHE_CPUS=str(2 * args.jobs), __GL_SHADER_DISK_CACHE_PATH=str(cache), MESA_SHADER_CACHE_DIR=str(cache),
-               XDG_CACHE_HOME=str(cache))
+    workers = min(args.jobs + 2, 6)
+    env.update(KYTY_PRECACHE_CPUS=str(2 * workers), KYTY_PRECACHE_DRIVER_JOBS=str(args.jobs),
+               __GL_SHADER_DISK_CACHE_PATH=str(cache), MESA_SHADER_CACHE_DIR=str(cache), XDG_CACHE_HOME=str(cache))
     with args.gpu_lock.open('a') as lock, (root / 'driver.log').open('ab') as log:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         command = [binary, root, title, version, '28800']
@@ -243,7 +244,8 @@ def main():
     gpu = commands.add_parser('driver')
     gpu.add_argument('work', type=Path)
     gpu.add_argument('--modules-only', action='store_true')
-    gpu.add_argument('--jobs', type=int, choices=range(1, 7), default=4)
+    gpu.add_argument('--jobs', type=int, choices=range(1, 7), default=4,
+                     help='maximum simultaneous Vulkan compute calls')
     gpu.add_argument('--four-job-marker', type=Path)
     gpu.add_argument('--denylist', type=Path)
     gpu.add_argument('--gpu-lock', type=Path, required=True)

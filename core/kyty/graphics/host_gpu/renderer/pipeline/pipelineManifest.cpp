@@ -3312,7 +3312,8 @@ PipelineCache::ManifestBacklog PipelineCache::GetManifestBacklog() const {
 	}
 	backlog.modules_done     = state.built + state.found + state.failed;
 	backlog.modules_total    = state.warm_modules.size();
-	backlog.failures         = state.failed + state.pipelines_failed + state.dropped.load(std::memory_order_relaxed);
+	backlog.failures         = state.failed + state.pipelines_failed + state.compute_failed +
+	                           state.dropped.load(std::memory_order_relaxed);
 	backlog.pipelines_done   = state.pipelines + state.pipelines_known + state.pipelines_failed;
 	backlog.threads          = static_cast<uint32_t>(state.threads.size());
 	backlog.module_seconds   = state.module_time.Get();

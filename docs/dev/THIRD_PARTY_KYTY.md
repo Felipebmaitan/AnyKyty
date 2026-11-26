@@ -311,6 +311,8 @@ tools/precache/precache --binary "$build/precache-tool/kyty_precache" inventory 
 The output directory contains the local shader store, creation records, compute recipes, packaged Kyty manifests and a report of unsupported input formats. For a manually verified binding map, pass `--bindings IMAGE MAP`.
 Pass `--graphics-bundle ASSET` to also write `graphics-passes.json` from a supported local effect bundle and the supplied relinked images.
 
+The headless driver tool limits simultaneous Vulkan compute requests with `precache driver --jobs N`. Its manifest queue can use up to two additional workers, capped at six total. With the default four driver slots, the two additional workers handle smaller manifest jobs. The `compute_lookup` and `compute_create` timing rows show accumulated time waiting for a driver slot and time inside Vulkan. Create calls can reuse driver-internal data.
+
 With `KYTY_CAPTURE_QUEUED_PIPELINES` enabled, collect the complete graphics recipes from one or more logs for the same title and version. Pass `--manifest` once per existing manifest to merge its recorded recipes with the captures.
 
 ```sh

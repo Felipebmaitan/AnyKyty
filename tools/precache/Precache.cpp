@@ -39,9 +39,44 @@ unsigned g_jobs_limit = 4;
 uint64_t g_finished_pipelines = 0;
 const char* g_four_job_marker = nullptr;
 
+struct DriverComputeTiming {
+	uint64_t calls = 0;
+	uint64_t successful = 0;
+	std::chrono::steady_clock::duration waited {};
+	std::chrono::steady_clock::duration duration {};
+	std::chrono::steady_clock::duration longest {};
+
+	void Record(VkResult result, std::chrono::steady_clock::duration queue_time,
+	            std::chrono::steady_clock::duration driver_time) {
+		calls++;
+		successful += result == VK_SUCCESS;
+		waited += queue_time;
+		duration += driver_time;
+		longest = std::max(longest, driver_time);
+	}
+
+	void Report(const char* route) const {
+		const auto millis = [](auto elapsed) { return std::chrono::duration<double, std::milli>(elapsed).count(); };
+		std::fprintf(stderr,
+		             "kyty_precache: compute_%s calls=%llu success=%llu queue_ms=%.1f driver_ms=%.1f longest_ms=%.1f\n",
+		             route, static_cast<unsigned long long>(calls), static_cast<unsigned long long>(successful),
+		             millis(waited), millis(duration), millis(longest));
+	}
+};
+
+DriverComputeTiming g_lookup_time;
+DriverComputeTiming g_create_time;
+
+unsigned DriverComputeLimit() {
+	const auto fallback = std::max(1u, std::thread::hardware_concurrency() / 2);
+	const auto* value = std::getenv("KYTY_PRECACHE_DRIVER_JOBS");
+	return value == nullptr ? fallback : static_cast<unsigned>(std::clamp(std::atoi(value), 1, 6));
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count,
                                                       const VkComputePipelineCreateInfo* infos,
                                                       const VkAllocationCallbacks* allocator, VkPipeline* pipelines) {
+	const auto asked = std::chrono::steady_clock::now();
 	{
 		std::unique_lock lock(g_jobs_mutex);
 		g_jobs_available.wait(lock, [] {
@@ -50,10 +85,16 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, VkPipelin
 		});
 		++g_jobs_active;
 	}
+	const auto admitted = std::chrono::steady_clock::now();
 	const auto result = g_create_compute_pipelines(device, cache, count, infos, allocator, pipelines);
+	const auto finished = std::chrono::steady_clock::now();
+	const auto lookup = std::ranges::all_of(std::span(infos, count), [](const auto& info) {
+		return (info.flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) != 0;
+	});
 	{
 		std::lock_guard lock(g_jobs_mutex);
 		--g_jobs_active;
+		(lookup ? g_lookup_time : g_create_time).Record(result, admitted - asked, finished - admitted);
 		if (result == VK_SUCCESS) {
 			const auto previous = g_finished_pipelines;
 			g_finished_pipelines += count;
@@ -231,12 +272,14 @@ int main(int argc, char** argv) {
 		}
 	}
 	KytyShim::ReportNativeRayTracing(graphics);
-	g_jobs_limit = std::max(1u, std::thread::hardware_concurrency() / 2);
+	g_jobs_limit = DriverComputeLimit();
 	g_four_job_marker = std::getenv("KYTY_PRECACHE_FOUR_JOB_MARKER");
 	g_create_compute_pipelines = VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateComputePipelines;
 	VULKAN_HPP_DEFAULT_DISPATCHER.vkCreateComputePipelines = CreateComputePipelines;
 	std::fprintf(stderr, "kyty_precache: GPU %s, store %s\n", graphics.physical_device_properties.deviceName.data(),
 	             ShaderStorePath().string().c_str());
+	std::fprintf(stderr, "kyty_precache: manifest workers=%u compute driver limit=%u\n",
+	             std::max(1u, std::thread::hardware_concurrency() / 2), g_jobs_limit);
 	graphics.image_heap_layout = ImageHeap::CreateLayout(graphics.device);
 	NoImageHeap heap;
 	bool completed = false;
@@ -269,6 +312,8 @@ int main(int argc, char** argv) {
 		std::fprintf(stderr, "kyty_precache: saved after %.1f s\n",
 		             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 	}
+	g_lookup_time.Report("lookup");
+	g_create_time.Report("create");
 	std::fprintf(stderr, "kyty_precache: done\n");
 	std::fflush(stderr);
 	std::_Exit(completed ? 0 : 124);
