@@ -19,6 +19,7 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <functional>
+#include <mutex>
 #include <numeric>
 #include <string_view>
 #include <tuple>
@@ -71,6 +72,16 @@ bool SpecializationFail(std::string_view message) {
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
 	return false;
+}
+
+bool SpecializationFailOnce(uint64_t shader_hash, std::string_view message) {
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> reported;
+	{
+		std::lock_guard lock(mutex);
+		if (!reported.insert(shader_hash).second) return false;
+	}
+	return SpecializationFail(message);
 }
 
 Decoder::ImageDimension DescriptorDimension(const DescriptorValue&  descriptor,
@@ -286,8 +297,9 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		value.dwords.fill(0u);
 		return true;
 	}
+	const bool byte_indexed = indexed && descriptor.Stride() == 1u && descriptor.OutOfBounds() == 3u;
 	if (descriptor.SwizzleEnabled() || descriptor.AddTid() ||
-	    descriptor.OutOfBounds() != (indexed ? 0u : 3u)) {
+	    (descriptor.OutOfBounds() != (indexed ? 0u : 3u) && !byte_indexed)) {
 		return SpecializationFail(fmt::format(
 		    "indirect buffers require exact linear index or byte bounds: "
 		    "descriptor={:08x},{:08x},{:08x},{:08x} swizzle={} add_tid={} oob={} "
@@ -317,8 +329,8 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 			return true;
 		}
 		const auto alignment = std::min(4u, format.byte_size);
-		if (descriptor.Stride() < format.byte_size ||
-		    (descriptor.Stride() & (alignment - 1u)) != 0u ||
+		if ((!byte_indexed && (descriptor.Stride() < format.byte_size ||
+		                       (descriptor.Stride() & (alignment - 1u)) != 0u)) ||
 		    (descriptor.Base48() & (alignment - 1u)) != 0u)
 			return SpecializationFail("indirect formatted buffers require aligned full-format records");
 	} else if ((!indexed && descriptor.Stride() != 1u) ||
@@ -2425,7 +2437,22 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	t_record_blocks.clear();
 	for (auto& keys: PlanScratch(program).selector_keys) keys.resolved = false;
-	if (!program.resource_tracking_complete) return false;
+	if (!program.resource_tracking_complete) {
+		const auto indirect = std::ranges::count_if(program.descriptor_sources, [](const DescriptorSource& source) {
+			return source.indirect_descriptor.has_value();
+		});
+		const auto vector_tables = std::ranges::count_if(program.descriptor_sources, [](const DescriptorSource& source) {
+			return source.indirect_descriptor &&
+			       (!source.indirect_descriptor->table_scalar || source.indirect_descriptor->selector ||
+			        source.indirect_descriptor->pointer_table);
+		});
+		return SpecializationFailOnce(program.shader_hash, fmt::format(
+		    "resource plan incomplete hash=0x{:016x} stage={}: shader resource tracking stopped, or memory writes "
+		    "through addresses alongside captured descriptor reads (indirect sources={}, of them read by vector "
+		    "loads, a selector or a pointer table={}, call-source reads={})",
+		    program.shader_hash, static_cast<uint32_t>(program.stage), indirect, vector_tables,
+		    program.source_reads.size()));
+	}
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
 		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX;
 	};
@@ -2450,7 +2477,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			    !uses_workgroup_count(program.descriptor_sources[source])) continue;
 			if ((runtime.indirect_args_address & 3u) != 0u ||
 			    !ReadTable(runtime.indirect_args_address, sizeof(workgroup_counts), 0u,
-			               observed, workgroup_counts)) return false;
+			               observed, workgroup_counts)) {
+				return SpecializationFail(fmt::format(
+				    "indirect dispatch arguments at 0x{:x} unreadable hash=0x{:016x}",
+				    runtime.indirect_args_address, program.shader_hash));
+			}
 			observed.workgroup_counts = workgroup_counts;
 			break;
 		}
@@ -2510,11 +2541,17 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	for (uint32_t i = 0; i < snapshot.buffers.size(); ++i) {
 		const auto base_index =
 		    i < program.info.buffers.size() ? i : specialization.buffers[i].indirect_root;
-		if (base_index >= program.info.buffers.size()) return false;
+		if (base_index >= program.info.buffers.size()) {
+			return SpecializationFail(fmt::format("buffer {} has no root buffer hash=0x{:016x}", i,
+			                                      program.shader_hash));
+		}
 		const auto& base = program.info.buffers[base_index];
 		if (i < program.info.buffers.size()) {
 			const auto* source = Source(program, base.source);
-			if (source == nullptr) return false;
+			if (source == nullptr) {
+				return SpecializationFail(fmt::format("buffer {} has no descriptor source {} hash=0x{:016x}", i,
+				                                      base.source, program.shader_hash));
+			}
 			if (source->indirect_descriptor.has_value()) {
 				snapshot.buffers[i] = {.dword_count = 4u};
 				if (WalkedActive(program, base.source)) {
