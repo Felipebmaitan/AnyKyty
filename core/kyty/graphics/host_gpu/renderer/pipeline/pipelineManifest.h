@@ -6,6 +6,8 @@
 #include <array>
 #include <charconv>
 #include <cstdint>
+#include <filesystem>
+#include <iosfwd>
 #include <span>
 #include <string>
 #include <string_view>
@@ -67,6 +69,9 @@ struct PipelineManifest {
 	std::vector<ManifestPipeline>                                 pipelines;
 	std::vector<std::pair<uint64_t, ShaderTessellationInputInfo>> tessellation_layouts;
 };
+
+bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_store,
+                          std::ostream& creation_records, std::ostream& report);
 
 void NormalizeManifestInput(ManifestModule& module);
 

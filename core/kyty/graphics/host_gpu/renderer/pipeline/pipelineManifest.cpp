@@ -1106,27 +1106,60 @@ bool ReadCodeRecord(const CodeRecord& record, const uint8_t* compressed, std::ve
 	       ZSTD_decompress(words.data(), bytes, compressed, record.compressed_bytes) == bytes;
 }
 
+constexpr std::string_view ShaderFooterMagic = "barefoot";
+constexpr size_t ShaderFooterSize = 0x30;
+
+std::span<const uint8_t> ShaderProgramAt(std::span<const uint8_t> data, size_t footer_offset) {
+	if (data.size() - footer_offset < ShaderFooterSize ||
+	    std::memcmp(data.data() + footer_offset, ShaderFooterMagic.data(), ShaderFooterMagic.size()) != 0) {
+		return {};
+	}
+	std::array<uint32_t, 8> footer {};
+	std::memcpy(footer.data(), data.data() + footer_offset, sizeof(footer));
+	const auto program = Common::AlignUp(uint64_t {footer[5]}, 16) + footer[6];
+	const auto before = Common::AlignUp(program, 16) + Common::AlignUp(uint64_t {footer[7]}, 16);
+	if (footer[4] != 1 || footer[5] == 0 || program % 4 != 0 || before > footer_offset) {
+		return {};
+	}
+	return data.subspan(footer_offset - before, program);
+}
+
 template <typename Found>
 uint32_t FindShaderPrograms(std::span<const uint8_t> data, Found&& found) {
-	constexpr std::string_view Magic      = "barefoot";
-	constexpr size_t           FooterSize = 0x30;
-	const std::string_view     text(reinterpret_cast<const char*>(data.data()), data.size());
-	uint32_t                   count = 0;
-	for (size_t at = text.find(Magic); at != std::string_view::npos; at = text.find(Magic, at + 1)) {
-		if (data.size() - at < FooterSize) {
-			break;
+	const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
+	uint32_t count = 0;
+	for (size_t at = text.find(ShaderFooterMagic); at != std::string_view::npos;
+	     at = text.find(ShaderFooterMagic, at + 1)) {
+		const auto program = ShaderProgramAt(data, at);
+		if (!program.empty()) {
+			found(program);
+			count++;
 		}
-		std::array<uint32_t, 8> footer {};
-		std::memcpy(footer.data(), data.data() + at, sizeof(footer));
-		const auto program = Common::AlignUp(uint64_t {footer[5]}, 16) + footer[6];
-		const auto before  = Common::AlignUp(program, 16) + Common::AlignUp(uint64_t {footer[7]}, 16);
-		if (footer[4] != 1 || footer[5] == 0 || program % 4 != 0 || before > at) {
-			continue;
-		}
-		count++;
-		found(data.subspan(at - before, program));
 	}
 	return count;
+}
+
+template <typename Found>
+void FindShaderCreationRecords(std::span<const uint8_t> data, Found&& found) {
+	constexpr std::string_view Magic("1234\x18\0\0\0", 8);
+	constexpr size_t HeaderSize = 96;
+	const std::string_view text(reinterpret_cast<const char*>(data.data()), data.size());
+	for (size_t at = text.find(Magic); at != std::string_view::npos; at = text.find(Magic, at + Magic.size())) {
+		if (data.size() - at < HeaderSize) {
+			break;
+		}
+		std::array<uint32_t, 2> sizes {};
+		std::memcpy(sizes.data(), data.data() + at + 64, sizeof(sizes));
+		const auto [header, code] = sizes;
+		if (header < HeaderSize || header > data.size() - at || code < ShaderFooterSize ||
+		    code > data.size() - at - header) {
+			continue;
+		}
+		const auto program = ShaderProgramAt(data, at + header + code - ShaderFooterSize);
+		if (!program.empty() && program.data() == data.data() + at + header) {
+			found(data.subspan(at, size_t {header} + code));
+		}
+	}
 }
 
 bool Lz4Decompress(std::span<const uint8_t> src, std::span<uint8_t> dst) {
@@ -1257,14 +1290,14 @@ struct SpanReader {
 };
 
 template <typename Found>
-void ForEachUnrealShader(std::span<const uint8_t> archive, Found&& found) {
+bool ForEachUnrealShader(std::span<const uint8_t> archive, Found&& found) {
 	SpanReader reader {archive};
 	const auto array = [&](uint32_t element) {
 		const auto count = reader.Get<uint32_t>();
 		return reader.Skip(uint64_t {count} * element) ? count : 0;
 	};
 	if (reader.Get<uint32_t>() != 2) {
-		return;
+		return false;
 	}
 	array(20);
 	array(20);
@@ -1274,9 +1307,10 @@ void ForEachUnrealShader(std::span<const uint8_t> archive, Found&& found) {
 	array(16);
 	array(4);
 	if (!reader.ok) {
-		return;
+		return false;
 	}
 	const auto code = archive.subspan(reader.at);
+	bool complete = true;
 	for (uint32_t i = 0; i < shaders; i++) {
 		SpanReader entry {archive, table + i * 17};
 		const auto offset = entry.Get<uint64_t>();
@@ -1284,8 +1318,11 @@ void ForEachUnrealShader(std::span<const uint8_t> archive, Found&& found) {
 		const auto size   = entry.Get<uint32_t>();
 		if (offset <= code.size() && stored <= code.size() - offset) {
 			found(code.subspan(offset, stored), size);
+		} else {
+			complete = false;
 		}
 	}
+	return complete;
 }
 
 template <typename Read, typename Archive, typename Assets>
@@ -1562,11 +1599,11 @@ void ForEachUnityShaderFile(uint64_t size, Read&& read, Found&& found) {
 		data_at = Common::AlignUp(data_at, 16);
 	}
 	std::vector<uint8_t> stored;
-	std::vector<uint8_t> table(table_size);
 	if (!reader.ok || table_at > size || table_stored > size - table_at || table_size > (64u << 20u) ||
 	    !read(table_at, table_stored, stored)) {
 		return;
 	}
+	std::vector<uint8_t> table(table_size);
 	const auto method = flags & 0x3fu;
 	if (method == 0 && table_stored == table_size) {
 		table = stored;
@@ -2036,22 +2073,19 @@ void ForEachFrostbiteShaderEntry(const std::vector<std::vector<uint8_t>>& tocs, 
 	}
 }
 
-}
+struct ShaderScanStats {
+	uint64_t bytes = 0;
+	uint32_t files = 0;
+	uint32_t read_failures = 0;
+	uint32_t skipped_entries = 0;
+	uint32_t unresolved_containers = 0;
+	uint32_t unresolved_container_blocks = 0;
+};
 
-bool PipelineCache::ScanGameFiles(const std::stop_token&                                          stop,
-                                  const std::function<void(uint64_t, std::span<const uint32_t>)>& append) {
-	auto& state = *m_manifest;
-	std::filesystem::path root;
-	for (uint32_t tries = 0; tries < 200 && !stop.stop_requested(); tries++) {
-		root = LibKernel::FileSystem::GetRealFilename("/app0");
-		if (!root.empty()) {
-			break;
-		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	}
-	if (root.empty()) {
-		return false;
-	}
+template <typename Search, typename Stop, typename Known, typename Provided>
+ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::stop_token& stop,
+                                Search&& search, Stop&& nothing_missing, Known&& known, Provided&& provided,
+                                bool exhaustive) {
 	constexpr uint32_t SampleFiles = 32;
 	constexpr uint64_t SampleBytes = 256ull << 20u;
 	constexpr uint32_t Piece   = 64u << 20u;
@@ -2061,55 +2095,10 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 	constexpr uint32_t RunPiece    = 8u << 20u;
 	constexpr uint64_t RunQuiet    = 16ull << 20u;
 	constexpr uint32_t ProbeFiles = 256;
-	const auto         start      = std::chrono::steady_clock::now();
-	size_t             listed     = 0;
-	{
-		std::scoped_lock lock(state.mutex);
-		listed = state.code.size();
-	}
-	std::unordered_set<uint64_t> found;
-	std::unordered_set<uint64_t> found_listed;
-	uint32_t                     provided = 0;
-	uint32_t                     files    = 0;
-	uint64_t                     bytes    = 0;
-	std::vector<uint8_t>         data;
-	std::vector<uint32_t>        code;
-	const auto search = [&](std::span<const uint8_t> chunk) {
-		return FindShaderPrograms(chunk, [&](std::span<const uint8_t> program) {
-			const auto hash = XXH3_64bits(program.data(), program.size());
-			if (!found.insert(hash).second) {
-				return;
-			}
-			{
-				std::scoped_lock lock(state.mutex);
-				const auto       entry = state.code.find(hash);
-				if (entry == state.code.end()) {
-					return;
-				}
-				found_listed.insert(hash);
-				if (entry->second.mapped) {
-					return;
-				}
-			}
-			code.resize(program.size() / sizeof(uint32_t));
-			std::memcpy(code.data(), program.data(), program.size());
-			if (ProvideCode(hash, code, false)) {
-				provided++;
-				append(hash, code);
-			}
-		});
-	};
-	auto       next_count      = start;
-	bool       missing         = true;
-	const auto nothing_missing = [&] {
-		if (const auto now = std::chrono::steady_clock::now(); now >= next_count) {
-			next_count = now + std::chrono::milliseconds(250);
-			std::scoped_lock lock(state.mutex);
-			missing = std::ranges::any_of(state.code | std::views::values,
-			                              [](const auto& entry) { return !entry.mapped; });
-		}
-		return !missing;
-	};
+	ShaderScanStats stats;
+	auto& bytes = stats.bytes;
+	auto& files = stats.files;
+	std::vector<uint8_t> data;
 	struct Run {
 		uint64_t end;
 		uint32_t shaders;
@@ -2167,35 +2156,44 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 			if (run.end >= reach && run.silent >= quiet) {
 				break;
 			}
-			kept = std::min<size_t>(data.size(), Overlap);
+			kept = std::min<size_t>(data.size(), exhaustive ? Piece : Overlap);
 			std::memmove(data.data(), data.data() + data.size() - kept, kept);
 		}
 		return run;
 	};
 	std::vector<uint8_t> shader;
 	const auto           search_archive = [&](std::span<const uint8_t> archive) {
-		ForEachUnrealShader(archive, [&](std::span<const uint8_t> stored, uint32_t size) {
+		return ForEachUnrealShader(archive, [&](std::span<const uint8_t> stored, uint32_t size) {
+			if (size == 0) {
+				stats.unresolved_container_blocks++;
+				return;
+			}
 			if (stored.size() == size) {
 				search(stored);
 				return;
 			}
 			if (size > (16u << 20u)) {
+				stats.unresolved_container_blocks++;
 				return;
 			}
 			shader.resize(size);
 			if (Lz4Decompress(stored, shader)) {
 				search(shader);
+			} else {
+				stats.unresolved_container_blocks++;
 			}
 		});
 	};
 	const auto read_file = [&](Common::File& file, uint64_t offset, uint64_t size, std::vector<uint8_t>& out) {
 		uint32_t done = 0;
 		if (size > (1u << 30u) || !file.Seek(offset)) {
+			stats.read_failures++;
 			return false;
 		}
 		out.resize(size);
 		file.Read(out.data(), static_cast<uint32_t>(size), &done);
 		bytes += done;
+		if (done != size) stats.read_failures++;
 		return done == size;
 	};
 	const auto search_unreal = [&](const std::filesystem::path& path, const std::string& extension) {
@@ -2208,7 +2206,11 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 		};
 		std::vector<uint8_t> archive;
 		if (extension == ".pak") {
-			return ForEachUnrealEntry(file.Size(), read, search_archive, [&](std::span<const uint8_t> asset) {
+			files++;
+			const auto archive_entry = [&](std::span<const uint8_t> contents) {
+				if (!search_archive(contents)) stats.unresolved_container_blocks++;
+			};
+			return ForEachUnrealEntry(file.Size(), read, archive_entry, [&](std::span<const uint8_t> asset) {
 				search(asset);
 				FindCompressedShaders(asset, archive, [&](std::span<const uint8_t> shader) { search(shader); });
 			});
@@ -2216,8 +2218,8 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 		if (!read(0, file.Size(), archive)) {
 			return false;
 		}
-		search_archive(archive);
-		return true;
+		files++;
+		return search_archive(archive);
 	};
 	const auto search_unity = [&](const std::filesystem::path& path) {
 		Common::File file;
@@ -2277,7 +2279,7 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 			return std::ranges::equal(
 			    method, name, [](char a, char b) { return std::tolower(a) == std::tolower(b); });
 		};
-		const auto decompress = [&](std::string_view method, std::span<const uint8_t> stored,
+		const auto decode = [&](std::string_view method, std::span<const uint8_t> stored,
 		                            std::span<uint8_t> out) {
 			if (method.empty() ? stored.size() >= 2 && (stored[0] & 0x0fu) == 0x0c
 			                   : named(method, "Oodle")) {
@@ -2290,6 +2292,12 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 				           static_cast<int>(stored.size())) == static_cast<int>(out.size());
 			}
 			return (method.empty() || named(method, "LZ4")) && Lz4Decompress(stored, out);
+		};
+		const auto decompress = [&](std::string_view method, std::span<const uint8_t> stored,
+		                            std::span<uint8_t> out) {
+			const bool decoded = decode(method, stored, out);
+			if (!decoded) stats.unresolved_container_blocks++;
+			return decoded;
 		};
 		return ForEachIoStoreShaderGroup(toc, read, decompress,
 		                                 [&](std::span<const uint8_t> group) { search(group); });
@@ -2350,9 +2358,9 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 		std::vector<FrostbiteEntry>                              todo;
 		std::vector<uint8_t>                                     run;
 		ForEachFrostbiteShaderEntry(
-		    tocs, FrostbiteQuiet, read,
+		    tocs, exhaustive ? UINT32_MAX : FrostbiteQuiet, read,
 		    [&](std::span<const FrostbiteEntry> shaders) {
-			    const auto known = found_listed.size();
+			    const auto before_known = known();
 			    todo.clear();
 			    for (const auto& entry: shaders) {
 				    if (seen.emplace(entry.patch, entry.chunk, entry.cas, entry.offset).second) {
@@ -2377,7 +2385,7 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 				    }
 				    i = next;
 			    }
-			    return found_listed.size() != known;
+			    return known() != before_known;
 		    },
 		    [&] { return stop.stop_requested() || nothing_missing(); });
 		return true;
@@ -2399,7 +2407,23 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 	while (!folders.empty() && !stop.stop_requested() && !nothing_missing()) {
 		const auto folder = std::move(folders.back());
 		folders.pop_back();
-		for (const auto& entry: Common::File::GetDirEntries(folder)) {
+		std::vector<Common::File::DirEntry> entries;
+		if (exhaustive) {
+			std::error_code error;
+			for (std::filesystem::directory_iterator it(folder, error), end; !error && it != end; it.increment(error)) {
+				std::error_code status_error;
+				const auto status = it->symlink_status(status_error);
+				if (!status_error && (std::filesystem::is_regular_file(status) || std::filesystem::is_directory(status))) {
+					entries.push_back({Common::PathToString(it->path().filename()), std::filesystem::is_regular_file(status)});
+				} else {
+					stats.skipped_entries++;
+				}
+			}
+			if (error) stats.read_failures++;
+		} else {
+			entries = Common::File::GetDirEntries(folder);
+		}
+		for (const auto& entry: entries) {
 			if (stop.stop_requested() || nothing_missing()) {
 				break;
 			}
@@ -2417,8 +2441,9 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 			if (frostbite && (extension == ".cas" || extension == ".toc")) {
 				continue;
 			}
-			if ((extension == ".pak" || extension == ".ushaderbytecode") && search_unreal(path, extension)) {
-				continue;
+			if (extension == ".pak" || extension == ".ushaderbytecode") {
+				if (search_unreal(path, extension)) continue;
+				stats.unresolved_containers++;
 			}
 			if (extension == ".ucas" || extension == ".utoc") {
 				const auto toc_path = iostore_toc(path);
@@ -2429,9 +2454,21 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 					iostore_read.insert(Common::PathToString(toc_path));
 					continue;
 				}
+				stats.unresolved_containers++;
 			}
 			if (extension == ".bundle" || extension == ".unity3d" || extension == ".assets") {
 				search_unity(path);
+			}
+			if (exhaustive) {
+				Common::File file;
+				if (!file.Open(path, Common::File::Mode::Read)) {
+					stats.read_failures++;
+					continue;
+				}
+				files++;
+				const auto size = file.Size();
+				if (read_run(file, 0, size, 0, size, Piece, 0).end != size) stats.read_failures++;
+				continue;
 			}
 			auto& kind = kinds[extension];
 			if (kind.files >= SampleFiles || kind.bytes >= SampleBytes) {
@@ -2470,7 +2507,7 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 		}
 		files += from == 0 ? 1 : 0;
 		const auto size   = file.Size();
-		const auto before = provided;
+		const auto before = provided();
 		uint64_t   read   = from;
 		for (uint64_t at = from; at < size && !stop.stop_requested() && !nothing_missing();) {
 			const auto window = std::min<uint64_t>(size, at + ProbeBytes);
@@ -2480,9 +2517,9 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 			}
 			const auto begin = std::max(read, at >= from + ProbeStride ? at - ProbeStride + ProbeBytes : from);
 			const auto floor = read;
-			const auto known = found_listed.size();
+			const auto before_known = known();
 			read             = read_run(file, begin, window, RunQuiet, size, RunPiece, 0).end;
-			for (uint64_t end = begin, silent = 0; found_listed.size() != known && end > floor &&
+			for (uint64_t end = begin, silent = 0; known() != before_known && end > floor &&
 			                                       silent < RunQuiet && !stop.stop_requested();) {
 				const auto back = std::max(floor, end - RunPiece);
 				const auto run  = read_run(file, back, 0, 0, std::min(size, end + Overlap),
@@ -2492,13 +2529,119 @@ bool PipelineCache::ScanGameFiles(const std::stop_token&                        
 			}
 			at = std::max(at + ProbeStride, read);
 		}
-		kind->probed = provided != before ? 0 : kind->probed + 1;
+		kind->probed = provided() != before ? 0 : kind->probed + 1;
 	}
+	return stats;
+}
+
+}
+
+bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_store,
+                          std::ostream& creation_records, std::ostream& report) {
+	code_store.write(reinterpret_cast<const char*>(&CodeStoreMagic), sizeof(CodeStoreMagic));
+	std::unordered_set<uint64_t> programs;
+	std::unordered_set<uint64_t> records;
+	std::vector<uint8_t> compressed;
+	const auto search = [&](std::span<const uint8_t> chunk) {
+		const auto found = FindShaderPrograms(chunk, [&](std::span<const uint8_t> program) {
+			const auto hash = XXH3_64bits(program.data(), program.size());
+			if (!programs.insert(hash).second) return;
+			compressed.resize(ZSTD_compressBound(program.size()));
+			const auto size = ZSTD_compress(compressed.data(), compressed.size(), program.data(), program.size(), 3);
+			if (ZSTD_isError(size) != 0 || size > UINT32_MAX) {
+				code_store.setstate(std::ios::failbit);
+				return;
+			}
+			const CodeRecord record {hash, static_cast<uint32_t>(program.size() / sizeof(uint32_t)),
+			                         static_cast<uint32_t>(size)};
+			code_store.write(reinterpret_cast<const char*>(&record), sizeof(record));
+			code_store.write(reinterpret_cast<const char*>(compressed.data()), size);
+		});
+		FindShaderCreationRecords(chunk, [&](std::span<const uint8_t> record) {
+			if (records.insert(XXH3_64bits(record.data(), record.size())).second) {
+				creation_records.write(reinterpret_cast<const char*>(record.data()), record.size());
+			}
+		});
+		return found;
+	};
+	const auto found_count = [&] { return programs.size(); };
+	const auto should_stop = [&] { return !code_store || !creation_records; };
+	const auto stats = ScanShaderFiles(root, {}, search, should_stop, found_count, found_count, true);
+	report << fmt::format("{{\"shader_programs\":{},\"creation_records\":{},\"files_read\":{},\"bytes_read\":{},"
+	                      "\"read_failures\":{},\"skipped_entries\":{},\"unresolved_containers\":{},"
+	                      "\"unresolved_container_blocks\":{}}}\n",
+	                      programs.size(), records.size(), stats.files, stats.bytes, stats.read_failures,
+	                      stats.skipped_entries, stats.unresolved_containers, stats.unresolved_container_blocks);
+	return code_store && creation_records && report;
+}
+
+bool PipelineCache::ScanGameFiles(const std::stop_token&                                          stop,
+                                  const std::function<void(uint64_t, std::span<const uint32_t>)>& append) {
+	auto& state = *m_manifest;
+	std::filesystem::path root;
+	for (uint32_t tries = 0; tries < 200 && !stop.stop_requested(); tries++) {
+		root = LibKernel::FileSystem::GetRealFilename("/app0");
+		if (!root.empty()) {
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
+	if (root.empty()) {
+		return false;
+	}
+	const auto         start      = std::chrono::steady_clock::now();
+	size_t             listed     = 0;
+	{
+		std::scoped_lock lock(state.mutex);
+		listed = state.code.size();
+	}
+	std::unordered_set<uint64_t> found;
+	std::unordered_set<uint64_t> found_listed;
+	uint32_t                     provided = 0;
+	std::vector<uint32_t>        code;
+	const auto search = [&](std::span<const uint8_t> chunk) {
+		return FindShaderPrograms(chunk, [&](std::span<const uint8_t> program) {
+			const auto hash = XXH3_64bits(program.data(), program.size());
+			if (!found.insert(hash).second) {
+				return;
+			}
+			{
+				std::scoped_lock lock(state.mutex);
+				const auto       entry = state.code.find(hash);
+				if (entry == state.code.end()) {
+					return;
+				}
+				found_listed.insert(hash);
+				if (entry->second.mapped) {
+					return;
+				}
+			}
+			code.resize(program.size() / sizeof(uint32_t));
+			std::memcpy(code.data(), program.data(), program.size());
+			if (ProvideCode(hash, code, false)) {
+				provided++;
+				append(hash, code);
+			}
+		});
+	};
+	auto       next_count      = start;
+	bool       missing         = true;
+	const auto nothing_missing = [&] {
+		if (const auto now = std::chrono::steady_clock::now(); now >= next_count) {
+			next_count = now + std::chrono::milliseconds(250);
+			std::scoped_lock lock(state.mutex);
+			missing = std::ranges::any_of(state.code | std::views::values,
+			                              [](const auto& entry) { return !entry.mapped; });
+		}
+		return !missing;
+	};
+	const auto stats = ScanShaderFiles(root, stop, search, nothing_missing,
+	                                  [&] { return found_listed.size(); }, [&] { return provided; }, false);
 	ManifestLog("[ShaderScan] game files: {} shaders found ({} of {} listed by the manifest, {} new), {:.1f} s "
 	            "({} files, {:.0f} MB read)",
 	            found.size(), found_listed.size(), listed, provided,
-	            Seconds(std::chrono::steady_clock::now() - start), files,
-	            static_cast<double>(bytes) / (1024.0 * 1024.0));
+	            Seconds(std::chrono::steady_clock::now() - start), stats.files,
+	            static_cast<double>(stats.bytes) / (1024.0 * 1024.0));
 	return true;
 }
 

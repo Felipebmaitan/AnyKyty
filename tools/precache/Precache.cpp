@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/pipeline/imageHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineManifest.h"
 #include "graphics/presentation/precompileNotice.h"
 #include "graphics/presentation/window.h"
 
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <span>
 #include <stop_token>
 #include <vector>
@@ -96,6 +98,8 @@ extern "C" void GuestThreadStackMappings_nid_no_patch(std::uintptr_t, std::uintp
                                                       void*) {}
 extern "C" void GuestDeliveryHold_nid_no_patch() {}
 extern "C" void GuestDeliveryRelease_nid_no_patch() {}
+extern "C" void KernelPauseGuestClock_nid_no_patch() {}
+extern "C" void KernelResumeGuestClock_nid_no_patch() {}
 
 namespace Loader::GuestOodle {
 bool Decompress(std::span<const uint8_t>, std::span<uint8_t>, const std::stop_token&) {
@@ -131,11 +135,48 @@ using namespace Libs::Graphics;
 struct NoImageHeap final: ShaderRecompiler::IR::ImageHeapSource {
 	bool Acquire(const ShaderRecompiler::IR::ImageHeapRequest&, ShaderRecompiler::IR::ImageHeapView&) override { return false; }
 };
+int InventoryShaders(const char* assets, const char* destination) {
+	std::error_code error;
+	const auto root = std::filesystem::canonical(assets, error);
+	if (error || !std::filesystem::is_directory(root, error)) {
+		std::fprintf(stderr, "kyty_precache: inventory requires a readable assets directory\n");
+		return 66;
+	}
+	const auto output = std::filesystem::weakly_canonical(destination, error);
+	if (error || std::mismatch(root.begin(), root.end(), output.begin(), output.end()).first == root.end() ||
+	    !std::filesystem::create_directory(output, error)) {
+		std::fprintf(stderr, "kyty_precache: inventory requires a new output directory outside the assets directory\n");
+		return 73;
+	}
+	const auto code_path = output / "shaders.code";
+	const auto creation_path = output / "creation-records.bin";
+	const auto report_path = output / "report.json";
+	std::ofstream code_store(code_path, std::ios::binary);
+	std::ofstream creation_records(creation_path, std::ios::binary);
+	std::ofstream report(report_path);
+	const bool written = code_store && creation_records && report && WriteShaderInventory(root, code_store, creation_records, report);
+	code_store.close();
+	creation_records.close();
+	report.close();
+	if (written && code_store && creation_records && report) return 0;
+	std::filesystem::remove(code_path, error);
+	std::filesystem::remove(creation_path, error);
+	std::filesystem::remove(report_path, error);
+	std::filesystem::remove(output, error);
+	std::fprintf(stderr, "kyty_precache: failed to write shader inventory\n");
+	return 74;
+}
+
 }
 
 int PrepareComputeRecipe(const char* signatures);
 
 int main(int argc, char** argv) {
+	if (argc > 1 && std::strcmp(argv[1], "--inventory") == 0) {
+		if (argc == 4) return InventoryShaders(argv[2], argv[3]);
+		std::fprintf(stderr, "usage: kyty_precache --inventory <assets-directory> <new-output-directory>\n");
+		return 64;
+	}
 	if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "--prepare-compute") == 0) {
 		return PrepareComputeRecipe(argc == 3 ? argv[2] : nullptr);
 	}

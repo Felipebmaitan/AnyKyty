@@ -10,6 +10,7 @@ import re
 import signal
 import struct
 import subprocess
+import sys
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -60,6 +61,15 @@ def zstd_decoder():
     decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
     decompress.restype = ctypes.c_size_t
     return decompress
+
+
+def inventory(args, binary):
+    scan = subprocess.run([binary, '--inventory', args.assets, args.output])
+    if scan.returncode != 0:
+        return scan.returncode
+    tool = Path(__file__).resolve().parents[1] / 'compute_recipes.py'
+    return subprocess.run([sys.executable, tool, args.output / 'shaders.code', args.output / 'creation-records.bin',
+                           '--output', args.output / 'compute-recipes.txt']).returncode
 
 
 def prepare(args, binary):
@@ -196,6 +206,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--binary', type=Path, default=Path(__file__).resolve().parents[2] / 'build-kyty/precache-tool/kyty_precache')
     commands = parser.add_subparsers(dest='command', required=True)
+    scan = commands.add_parser('inventory', help='scan title files and derive compute recipes without starting the title')
+    scan.add_argument('assets', type=Path)
+    scan.add_argument('output', type=Path)
     prep = commands.add_parser('prepare')
     prep.add_argument('store', type=Path)
     prep.add_argument('recipes', type=Path)
@@ -210,7 +223,11 @@ def main():
     gpu.add_argument('--gpu-lock', type=Path, required=True)
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
-    return prepare(args, binary) if args.command == 'prepare' else driver(args, binary)
+    if args.command == 'inventory':
+        return inventory(args, binary)
+    if args.command == 'prepare':
+        return prepare(args, binary)
+    return driver(args, binary)
 
 
 if __name__ == '__main__':
