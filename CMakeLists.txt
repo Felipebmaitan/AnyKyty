@@ -1017,6 +1017,9 @@ if(BUILD_TESTING)
         add_test(NAME kyty_shader_bundle COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_kyty_shader_bundle.py)
         set_tests_properties(kyty_shader_bundle PROPERTIES TIMEOUT 30)
+        add_test(NAME kyty_sampler_candidates COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_kyty_sampler_candidates.py)
+        set_tests_properties(kyty_sampler_candidates PROPERTIES TIMEOUT 30)
         add_test(NAME kyty_pgo COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_kyty_pgo.py)
         set_tests_properties(kyty_pgo PROPERTIES TIMEOUT 30)
