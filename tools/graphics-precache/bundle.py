@@ -14,6 +14,9 @@ from session import fields, read_manifest
 
 STAGES = ("vs", "ps", "gs", "ds", "hs", "cs")
 ALIGNMENT = 4096
+NATIVE_SHADER_MAGIC = b"sgaProg\0"
+EMBEDDED_SHADER_METADATA = 144
+EMBEDDED_SHADER_MIN_SIZE = 324
 
 
 class BundleReader:
@@ -60,7 +63,7 @@ class BundleReader:
         version = self.take(1)[0]
         archive = self.sized()
         magic, header_size, code_size = struct.unpack_from("<8sII", archive)
-        if magic != b"sgaProg\0" or header_size < 96 or code_size < 48 or 16 + header_size + code_size != len(archive):
+        if magic != NATIVE_SHADER_MAGIC or header_size < 96 or code_size < 48 or 16 + header_size + code_size != len(archive):
             raise ValueError("unsupported native shader wrapper")
         if struct.unpack_from("<2I", archive, 16) != (0x34333231, 24):
             raise ValueError("invalid native shader creation header")
@@ -112,7 +115,10 @@ def read_effect(reader, stages):
         indices = struct.iter_unpack("<I", reader.take(reader.word() * 4))
         selected = [library[index] for index, in indices]
         variants.append(selected)
+    return read_effect_passes(reader, variants)
 
+
+def read_effect_passes(reader, variants):
     reader.skip(80)
     rasterizer = [rasterizer_state(record) for record, in reader.counted(16)]
     depth_stencil = [depth_stencil_state(record) for record, in reader.counted(24)]
@@ -193,6 +199,51 @@ def read_bundles(path, hash64, include_resources=False):
                        stages=dict(zip(STAGES, stages)), effects=effects)
 
 
+def embedded_shader_starts(data, wrapper, floor):
+    size, = struct.unpack_from("<I", data, wrapper - 4)
+    if size < 176 or size > len(data) - wrapper:
+        return
+    name_end = wrapper - 5
+    for start in range(max(floor + 4, name_end - 256), name_end - 1):
+        name_size = data[start]
+        if name_size != name_end - start - 1 or data[name_end - 1] != 0:
+            continue
+        name = data[start + 1:name_end - 1]
+        if not name or b"\0" in name:
+            continue
+        count, = struct.unpack_from("<I", data, start - 4)
+        if 0 < count <= (len(data) - start) // EMBEDDED_SHADER_MIN_SIZE:
+            yield start - 4
+
+
+def read_embedded_bundles(path, hash64, *, include_resources=False):
+    if not path.stat().st_size:
+        raise ValueError("empty embedded shader bundle input")
+    with path.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        position = 12
+        end = 0
+        while (wrapper := data.find(NATIVE_SHADER_MAGIC, position)) >= 0:
+            position = wrapper + len(NATIVE_SHADER_MAGIC)
+            for start in embedded_shader_starts(data, wrapper, end):
+                reader = BundleReader(data, start, include_resources=include_resources)
+                stages = []
+                try:
+                    for _ in STAGES:
+                        count = reader.word()
+                        if count > (len(data) - reader.position) // EMBEDDED_SHADER_MIN_SIZE:
+                            raise ValueError("invalid embedded shader array size")
+                        stages.append([reader.shader(hash64, metadata_bytes=EMBEDDED_SHADER_METADATA) for _ in range(count)])
+                    effect = read_effect_passes(reader, stages)
+                except (IndexError, ValueError, struct.error):
+                    continue
+                if not effect["technique_count"] or not any("vs" in row["shaders"] for row in effect["passes"]):
+                    continue
+                end = position = reader.position
+                yield dict(offset=start, end=end, shared_binding_count=0,
+                           stages=dict(zip(STAGES, stages)), effects=[effect], embedded=True)
+                break
+
+
 def summarize(bundles):
     stages = Counter()
     totals = Counter()
@@ -226,20 +277,28 @@ def compare_manifest(path, stage_pairs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Inspect shipped graphics recipes in readable SGD5 shader bundles")
-    parser.add_argument("asset", type=Path, help="loose bundle or archive with aligned loose bundle data")
+    parser.add_argument("asset", nargs="?", type=Path, help="loose bundle or archive with aligned loose bundle data")
+    parser.add_argument("--embedded-image", action="append", default=[], type=Path,
+                        help="find validated native effect records embedded in an executable")
     parser.add_argument("--output", type=Path, help="write detailed private inventory JSON to a new file")
     parser.add_argument("--reference", action="append", default=[], type=Path, help="Kyty .kpm for shader pair comparison")
     parser.add_argument("--state-coverage", action="store_true", help="compare explicit raster and blend selections with references")
     parser.add_argument("--resource-coverage", action="store_true", help="compare reflected image dimensions with references")
     args = parser.parse_args(argv)
+    if args.asset is None and not args.embedded_image:
+        parser.error("provide an asset or at least one --embedded-image")
     if args.state_coverage and not args.reference:
         parser.error("--state-coverage requires at least one --reference")
     if args.resource_coverage and not args.reference:
         parser.error("--resource-coverage requires at least one --reference")
     try:
-        bundles = list(read_bundles(args.asset, xxhash(), include_resources=args.resource_coverage))
+        hash64 = xxhash()
+        bundles = (list(read_bundles(args.asset, hash64, include_resources=args.resource_coverage))
+                   if args.asset is not None else [])
+        for image in args.embedded_image:
+            bundles.extend(read_embedded_bundles(image, hash64, include_resources=args.resource_coverage))
         if not bundles:
-            raise ValueError("no readable aligned SGD5 bundle found")
+            raise ValueError("no readable shader bundle or embedded effect found")
         summary, stage_pairs = summarize(bundles)
         if args.reference:
             summary["references"] = [compare_manifest(path, stage_pairs) for path in args.reference]

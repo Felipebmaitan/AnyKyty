@@ -324,6 +324,8 @@ The offline bundle inventory reads loose `SGD5` databases with native `sgaProg` 
 python3 tools/graphics-precache/bundle.py asset.rpf --reference recorded.kpm --output inventory.json
 ```
 
+Add `--embedded-image title-executable` to include native effect records stored directly in an executable. The inventory verifies the shader wrappers, stage arrays, pass indices and effect tables before counting an embedded record. The executable can also be inspected on its own by omitting the bundle path.
+
 The optional inventory contains stage hashes, per-pass states and bindings, and the serialized rasterizer, depth/stencil and blend tables. The reference report measures vertex/pixel shader pairing coverage. Pass data alone may leave attachment formats, vertex bindings and resource specializations unresolved. Keep the exported inventory local.
 
 Add `--state-coverage` to compare explicitly selected states on candidate passes with the same vertex/pixel pair. It compares polygon mode, depth clip, alpha-to-coverage, blend enables and write masks against the values serialized by the Kyty manifest. Multiple candidates may disagree, and depth/stencil testing, cull mode and winding are dynamic Vulkan commands. The report gives field-level evidence without establishing pipeline identity. [Serialized fill modes](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_fill_mode)

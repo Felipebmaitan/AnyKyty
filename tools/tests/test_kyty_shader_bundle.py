@@ -25,7 +25,7 @@ def reflect(resources=()):
     return sized(struct.pack("<4H", len(resources), 0, 0, 8 + len(table)) + table)
 
 
-def shader(kind, code, resources=()):
+def shader(kind, code, resources=(), *, metadata_bytes=152):
     header = bytearray(96)
     struct.pack_into("<2I", header, 0, 0x34333231, 24)
     struct.pack_into("<2I", header, 64, 96, 64)
@@ -34,12 +34,15 @@ def shader(kind, code, resources=()):
     footer[:8] = b"barefoot"
     struct.pack_into("<4I", footer, 16, 1, 4, 0, 0)
     program = b"sgaProg\0" + words(96, 64) + header + words(code, 0, 0, 0) + footer
-    return b"\x02a\0\x32" + sized(program) + bytes(152) + reflect(resources)
+    return b"\x02a\0\x32" + sized(program) + bytes(metadata_bytes) + reflect(resources)
 
 
-def fixture(pixel_slot=1, vertex_resources=(), pixel_resources=()):
+def fixture(pixel_slot=1, vertex_resources=(), pixel_resources=(), *, embedded=False):
     header = b"SGD5" + bytes(8) + words(0) + reflect()
-    shaders = words(1) + shader(2, 0x100, vertex_resources) + words(1) + shader(1, 0x200, pixel_resources) + words(0, 0, 0, 0)
+    metadata_bytes = 144 if embedded else 152
+    vertex = shader(2, 0x100, vertex_resources, metadata_bytes=metadata_bytes)
+    pixel = shader(1, 0x200, pixel_resources, metadata_bytes=metadata_bytes)
+    shaders = words(1) + vertex + words(1) + pixel + words(0, 0, 0, 0)
     arrays = words(1, 0, 1, 0, 0, 0, 0, 0)
     raster = bytearray(16)
     raster[0] = 3
@@ -56,8 +59,10 @@ def fixture(pixel_slot=1, vertex_resources=(), pixel_resources=()):
     struct.pack_into("<H", row, 16, 24)
     technique_and_pass = words(1, 1 << 24, 1) + row + words(4, 0, 0, 0, 0)
     binding_and_pool = words(0x80000000) + reflect() + reflect() + words(1, 0x80000000, 0) + sized(b"t\0")
-    effect = b"\x02e\0" + words(0) + arrays + bytes(80) + states + technique_and_pass + binding_and_pool
-    return header + shaders + words(1) + effect + bytes(10)
+    effect = bytes(80) + states + technique_and_pass + binding_and_pool
+    if embedded:
+        return shaders + effect
+    return header + shaders + words(1) + b"\x02e\0" + words(0) + arrays + effect + bytes(10)
 
 
 def fixture_hash(program, length):
@@ -96,6 +101,18 @@ class ShaderBundleTest(unittest.TestCase):
         manifest.write_text("M a vs code=0000000000000100\nM b ps code=0000000000000200\n"
                             "M c ps code=0000000000000300\nP v=a p=b\nP v=a p=c\n")
         self.assertEqual(bundle.compare_manifest(manifest, pairs), dict(graphics_records=2, with_shipped_stage_pair=1))
+
+    def test_finds_unaligned_embedded_effect_after_invalid_candidate(self):
+        image = self.root / "fixture-image.bin"
+        prefix = b"pre" + fixture(pixel_slot=2, embedded=True) + b"between"
+        effect = fixture(embedded=True)
+        image.write_bytes(prefix + effect + fixture(embedded=True)[:-12])
+        found, = bundle.read_embedded_bundles(image, fixture_hash)
+        self.assertTrue(found["embedded"])
+        self.assertEqual((found["offset"], found["end"]), (len(prefix), len(prefix) + len(effect)))
+        summary, pairs = bundle.summarize([found])
+        self.assertEqual(summary["graphics_passes"], 1)
+        self.assertEqual(pairs, {("0000000000000100", "0000000000000200")})
 
     def test_reads_two_aligned_bundles(self):
         data = bytearray(3 * bundle.ALIGNMENT)
