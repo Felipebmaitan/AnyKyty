@@ -66,6 +66,18 @@ bool DecodeTableModuleRecord(ShaderRecompiler::IR::Reader& reader, ShaderProgram
 	return reader.ok && reader.bytes.empty() && ValidTableModule(key, cursor, module, spirv, plain_spirv);
 }
 
+bool ValidNativeGraphicsStages(const GraphicsPipelineKey& key, const std::array<const ShaderModule*, 4>& stages) {
+	const auto serves = [](const ShaderModule* module, ShaderType stage, uint64_t id) {
+		if (module == nullptr || id == 0 || module->id != id) return false;
+		const auto& info = module->info;
+		return info.stage == stage && info.table_mode && info.bindings.UsesPushData() &&
+		       !info.has_address_writes && !info.info.uses_gds;
+	};
+	return serves(stages[0], ShaderType::Vertex, key.stage_ids[0]) &&
+	       key.stage_ids[1] == 0 && key.stage_ids[2] == 0 && stages[1] == nullptr && stages[2] == nullptr &&
+	       (key.stage_ids[3] == 0 ? stages[3] == nullptr : serves(stages[3], ShaderType::Pixel, key.stage_ids[3]));
+}
+
 }
 
 bool EncodeModuleRecord(ShaderType stage, uint64_t hash, uint32_t user_data_count,
@@ -204,7 +216,7 @@ bool LoadStoredComputeModule(std::istream& input, std::span<const uint8_t> expec
 		Reader reader {.bytes = raw, .allocation_budget = MaxRecordBytes};
 		Record type {};
 		IoAll(reader, type);
-		if (!reader.ok || type > Record::TableModule) {
+		if (!reader.ok || type > Record::NativeGraphicsPipeline) {
 			return fail("invalid shader store record kind");
 		}
 		if (type != Record::Module) continue;

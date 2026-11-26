@@ -215,6 +215,38 @@ void TableGraphicsModuleRoundTrips() {
     }
 }
 
+void NativeGraphicsRequiresExactTableStages() {
+    using ShaderStoreFormat::ValidNativeGraphicsStages;
+
+    ShaderModule vertex;
+    vertex.id = 123u;
+    vertex.info.stage = ShaderType::Vertex;
+    vertex.info.table_mode = true;
+    vertex.info.bindings.push_data_start_dword = PushData::MeshDrawDwordCount;
+    ShaderModule pixel = vertex;
+    pixel.id = 456u;
+    pixel.info.stage = ShaderType::Pixel;
+    pixel.info.bindings.push_data_start_dword = PushData::PixelStart;
+    ShaderModule plain = pixel;
+    plain.id ^= PlainModuleIdXor;
+    GraphicsPipelineKey key {.stage_ids = {vertex.id, 0, 0, plain.id}};
+    Require(ValidNativeGraphicsStages(key, {&vertex, nullptr, nullptr, &plain}),
+            "native pipeline could not find the recorded plain pixel stage");
+    Require(!ValidNativeGraphicsStages(key, {&vertex, nullptr, nullptr, &pixel}),
+            "native pipeline accepted a different pixel variant");
+    Require(!ValidNativeGraphicsStages(key, {&vertex, nullptr, nullptr, nullptr}),
+            "native pipeline accepted a missing pixel stage");
+    plain.info.table_mode = false;
+    Require(!ValidNativeGraphicsStages(key, {&vertex, nullptr, nullptr, &plain}),
+            "native pipeline accepted a standard graphics layout");
+    key.stage_ids[3] = 0;
+    Require(ValidNativeGraphicsStages(key, {&vertex, nullptr, nullptr, nullptr}),
+            "native pipeline rejected a vertex-only variant");
+    key.stage_ids[1] = vertex.id;
+    Require(!ValidNativeGraphicsStages(key, {&vertex, &vertex, nullptr, nullptr}),
+            "native pipeline accepted an unsupported stage layout");
+}
+
 void StoredComputeModuleSelection() {
     using namespace ShaderStoreFormat;
 
@@ -281,6 +313,7 @@ int main() {
     RefusedPlanAbandonsTheStoreEntry();
     GraphicsStageDataRoundTrips();
     TableGraphicsModuleRoundTrips();
+    NativeGraphicsRequiresExactTableStages();
     StoredComputeModuleSelection();
     std::puts("kyty_shim_shader_store_encode: ok");
     return 0;

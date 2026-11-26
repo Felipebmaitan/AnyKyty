@@ -893,6 +893,7 @@ private:
 	void WriteDriverCache();
 
 	void WarmUp(const std::filesystem::path& path, bool driver_cache_restored);
+	void WarmUpNativePipelines() KYTY_REQUIRES(m_program_lock);
 	size_t RestoreStoreRecords(std::span<const uint8_t> bytes, std::span<const uint8_t> header);
 	struct StoreRecord;
 	bool ReadRecord(std::span<const uint8_t> frame, StoreRecord& record) const;
@@ -902,6 +903,7 @@ private:
 	void StoreTableModule(const ProgramKey& key, uint32_t cursor, const ShaderModule& module,
 	                      const std::vector<uint32_t>& spirv, const std::vector<uint32_t>& plain_spirv);
 	void StorePipeline(const GraphicsPipelineKey& key);
+	void StoreNativePipeline(const GraphicsPipelineKey& key, const std::array<const ShaderModule*, 4>& stages);
 	bool ResolveTessellationLayout(const HW::ShaderRegisters& sh, const ShaderParams& ls,
 	                               const ShaderParams& hs, uint64_t address, bool lookup_only,
 	                               ShaderTessellationInputInfo& tess) KYTY_REQUIRES(m_program_lock);

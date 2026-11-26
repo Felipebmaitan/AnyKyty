@@ -3305,6 +3305,7 @@ void PipelineCache::AsyncPipelineWorker() {
 		if (created && !cache_hit) {
 			NoteCreatedPipeline(started);
 		}
+		if (created && job.native) StoreNativePipeline(job.key, job.stages);
 		std::lock_guard lock(m_async_mutex);
 		if (job.native) {
 			auto& native = m_async_native.at(job.key);
@@ -4049,6 +4050,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 #endif
 			CreatePipelineInternal(m_graphics, cached, key, stages, m_driver_cache);
 		EXIT_NOT_IMPLEMENTED(cached.pipeline == nullptr || cached.pipeline_layout == nullptr);
+		StoreNativePipeline(key, stages);
 		return &cached;
 	}
 	if (m_last_graphics_pipeline != nullptr && key == m_last_graphics_key) {

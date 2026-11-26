@@ -238,7 +238,8 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 			}
 			return true;
 		}
-		case Record::GraphicsPipeline: {
+		case Record::GraphicsPipeline:
+		case Record::NativeGraphicsPipeline: {
 			reader.Raw(&record.pipeline, sizeof(record.pipeline));
 			return complete();
 		}
@@ -287,6 +288,10 @@ bool PipelineCache::AddRecord(StoreRecord& record) {
 			m_graphics_pipelines.try_emplace(record.pipeline);
 			break;
 		}
+		case Record::NativeGraphicsPipeline: {
+			m_native_graphics_pipelines.try_emplace(record.pipeline);
+			break;
+		}
 		case Record::TessellationLayout: {
 			m_tess_layouts.try_emplace(record.layout_key, record.layout);
 			break;
@@ -323,6 +328,15 @@ void PipelineCache::StorePipeline(const GraphicsPipelineKey& key) {
 	}
 	Writer record;
 	IoAll(record, Record::GraphicsPipeline);
+	record.Raw(&key, sizeof(key));
+	m_store.Append(std::move(record.bytes));
+}
+
+void PipelineCache::StoreNativePipeline(const GraphicsPipelineKey& key,
+                                        const std::array<const ShaderModule*, 4>& stages) {
+	if (!m_store || !ValidNativeGraphicsStages(key, stages)) return;
+	Writer record;
+	IoAll(record, Record::NativeGraphicsPipeline);
 	record.Raw(&key, sizeof(key));
 	m_store.Append(std::move(record.bytes));
 }
