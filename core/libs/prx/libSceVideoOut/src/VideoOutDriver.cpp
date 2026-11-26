@@ -946,7 +946,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
             pollHostHdr();
             OnMainThread([&] { mouseInput->UpdateCapture(!padInput->MouseModeEnabled()); });
 #if defined(ANYPS5_KYTY)
-            if (!current && startupStatus && !startupStatus->empty()) {
+            if (!current && startupStatus && !startupStatus->empty() && !AgcDriver::CurrentHostHdr().available) {
                 const ModalDialogView view{std::u16string(startupStatus->begin(), startupStatus->end()), {}};
                 const auto extensions = windowExtensions(window.Handle());
                 const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface,
