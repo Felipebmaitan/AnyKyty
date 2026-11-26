@@ -1,14 +1,33 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include "common/logging/log.h"
+#include "graphics/shader/recompiler/ShaderRecompiler.h"
 
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <mutex>
 #include <optional>
+#include <set>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
+
+void NoteFirstLaneShuffle(const EmitterState& state) {
+	static std::mutex mutex;
+	static std::set<std::pair<ShaderType, uint64_t>> shaders;
+	{
+		std::scoped_lock lock(mutex);
+		if (!shaders.emplace(state.program.stage, state.program.shader_hash).second) {
+			return;
+		}
+	}
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "Shader {} 0x{:016x}: using the legacy first-lane shuffle despite unadvertised subgroup support "
+	    "(stages=0x{:x}, ballot={}, shuffle={}, quad={})\n",
+	    StageName(state.program.stage), state.program.shader_hash, state.profile.subgroup_stages,
+	    state.profile.subgroup_ballot, state.profile.subgroup_shuffle, state.profile.subgroup_quad));
+}
 
 bool UserDataDwordIndex(const EmitterState& state, IR::ScalarReg reg, uint32_t& dword_index) {
 	const auto register_index = IR::RegIndex(reg);
@@ -851,8 +870,10 @@ uint32_t EmitLiveMask(EmitterState& state) {
 }
 
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	auto& state = ctx.state;
-	if (ctx.other_half == nullptr && !QuadLanes(state) &&
+	auto&      state     = ctx.state;
+	const auto stage_bit = 1u << static_cast<uint32_t>(state.program.stage);
+	const bool has_ballot = (state.profile.subgroup_stages & stage_bit) != 0 && state.profile.subgroup_ballot;
+	if (has_ballot && ctx.other_half == nullptr && !QuadLanes(state) && state.profile.subgroup_arithmetic &&
 	    state.program.stage != ShaderType::Pixel) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformArithmetic);
 		const auto first   = ctx.FirstLane(ctx.Ballot(inst.Arg(1)));
@@ -869,6 +890,10 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 		                          part);
 		return result;
 	}
+	if (!has_ballot || !state.profile.subgroup_shuffle || (QuadLanes(state) && !state.profile.subgroup_quad)) {
+		NoteFirstLaneShuffle(state);
+	}
+	state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
 	ctx.quad_read     = true;
 	const auto ballot = ctx.Ballot(inst.Arg(1));
 	const auto lane   = ctx.FirstLane(ballot);
