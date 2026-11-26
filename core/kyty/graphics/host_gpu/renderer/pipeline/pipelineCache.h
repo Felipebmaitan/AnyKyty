@@ -899,6 +899,8 @@ private:
 	bool AddRecord(StoreRecord& record) KYTY_REQUIRES(m_program_lock);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv, const std::vector<uint32_t>& plain_spirv);
+	void StoreTableModule(const ProgramKey& key, uint32_t cursor, const ShaderModule& module,
+	                      const std::vector<uint32_t>& spirv, const std::vector<uint32_t>& plain_spirv);
 	void StorePipeline(const GraphicsPipelineKey& key);
 	bool ResolveTessellationLayout(const HW::ShaderRegisters& sh, const ShaderParams& ls,
 	                               const ShaderParams& hs, uint64_t address, bool lookup_only,

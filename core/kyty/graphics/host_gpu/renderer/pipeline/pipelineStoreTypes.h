@@ -9,6 +9,8 @@
 
 namespace Libs::Graphics {
 
+inline constexpr uint32_t TableShaderKeyMarker = 0x54424c45u;
+
 struct ShaderProgramKey {
 	ShaderType            stage           = ShaderType::Unknown;
 	uint64_t              hash            = 0;

@@ -129,6 +129,7 @@ struct PipelineCache::StoreRecord {
 	bool                               plan_loaded = false;
 	bool                               incompatible = false;
 	ShaderModule                       module;
+	uint32_t                           table_cursor = 0;
 	GraphicsPipelineKey                pipeline {};
 	uint64_t                           layout_key = 0;
 	ShaderTessellationInputInfo        layout;
@@ -161,8 +162,10 @@ size_t PipelineCache::RestoreStoreRecords(std::span<const uint8_t> bytes, std::s
 			kept++;
 		}
 		for (size_t i = kept + 1; i < frames.size(); i++) {
-			if (read[i] != 0 && loaded[i].type == Record::Module && !loaded[i].incompatible) {
-				DestroyModule(loaded[i].module);
+			const auto& entry = loaded[i];
+			if (read[i] != 0 && !entry.incompatible &&
+			    (entry.type == Record::Module || entry.type == Record::TableModule)) {
+				DestroyModule(entry.module);
 			}
 		}
 	}
@@ -216,6 +219,25 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 			}
 			return true;
 		}
+		case Record::TableModule: {
+			auto& module = record.module;
+			std::vector<uint32_t> spirv, plain_spirv;
+			reader.allocation_budget = 64u << 20;
+			if (!DecodeTableModuleRecord(reader, record.key, record.table_cursor, module, spirv, plain_spirv)) return false;
+			const std::array<const ShaderModule*, 1> stages {&module};
+			if (!SampledDescriptorBudgetFits(stages)) return false;
+			module.module = CompileSPV(spirv, m_graphics.device);
+			if (module.module == nullptr) return false;
+			module.spirv_words = static_cast<uint32_t>(spirv.size());
+			if (!plain_spirv.empty()) {
+				module.plain = MakePlainModule(module, plain_spirv, m_graphics.device);
+				if (module.plain == nullptr) {
+					DestroyModule(module);
+					return false;
+				}
+			}
+			return true;
+		}
 		case Record::GraphicsPipeline: {
 			reader.Raw(&record.pipeline, sizeof(record.pipeline));
 			return complete();
@@ -245,6 +267,22 @@ bool PipelineCache::AddRecord(StoreRecord& record) {
 			program->second.modules.back().plan = &program->second.resource_plan;
 			break;
 		}
+		case Record::TableModule: {
+			auto& variants = m_table_programs[std::move(record.key)];
+			if (std::ranges::any_of(variants, [&](const TableVariant& variant) {
+				    return variant.push_data_cursor == record.table_cursor &&
+				           variant.specialization == record.module.specialization;
+			    })) {
+				DestroyModule(record.module);
+				break;
+			}
+			auto& variant = variants.emplace_back();
+			variant.specialization = record.module.specialization;
+			variant.push_data_cursor = record.table_cursor;
+			variant.done = true;
+			variant.module = std::move(record.module);
+			break;
+		}
 		case Record::GraphicsPipeline: {
 			m_graphics_pipelines.try_emplace(record.pipeline);
 			break;
@@ -266,6 +304,15 @@ void PipelineCache::StoreModule(const ProgramKey& key, const Program& program,
 	std::vector<uint8_t> record;
 	if (EncodeModuleRecord(key.stage, key.hash, key.user_data_count, key.static_state,
 	                       program.resource_plan, module, spirv, plain_spirv, record)) {
+		m_store.Append(std::move(record));
+	}
+}
+
+void PipelineCache::StoreTableModule(const ProgramKey& key, uint32_t cursor, const ShaderModule& module,
+                                     const std::vector<uint32_t>& spirv, const std::vector<uint32_t>& plain_spirv) {
+	if (!m_store) return;
+	std::vector<uint8_t> record;
+	if (EncodeTableModuleRecord(key, cursor, module, spirv, plain_spirv, record)) {
 		m_store.Append(std::move(record));
 	}
 }

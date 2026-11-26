@@ -3420,19 +3420,13 @@ bool PipelineCache::SpecializeDirectResources(const ShaderRecompiler::IR::Resour
 	return ShaderRecompiler::IR::SpecializeDirectResources(plan, snapshot, specialization);
 }
 
-namespace {
-
-constexpr uint32_t TableKeyMarker = 0x54424c45u;
-
-}
-
 template <typename InputInfo>
 PipelineCache::TableProgram PipelineCache::GetTableProgram(
     const ShaderParams& params, const InputInfo& input_info,
     const ShaderRecompiler::IR::ResourceSpecialization& specialization, uint32_t push_data_cursor) {
 	ProgramKey key;
 	SetShaderProgramKey(key, params, input_info, false);
-	key.static_state.push_back(TableKeyMarker);
+	key.static_state.push_back(TableShaderKeyMarker);
 	const ProgramLockGuard lock(m_program_lock);
 	auto&                  variants = m_table_programs[key];
 	for (auto& variant: variants) {
@@ -3502,6 +3496,7 @@ void PipelineCache::RunTableJob(CompileJob& job, InputInfo& input_info) {
 		module = BuildModule(job.key, options, std::move(translated), *job.specialization, {},
 		                     job.push_data_cursor, spirv, plain_spirv, &refusal);
 	}();
+	if (module) StoreTableModule(job.key, job.push_data_cursor, *module, spirv, plain_spirv);
 	LockPrograms();
 	job.table->module  = std::move(module);
 	job.table->refusal = job.table->module ? std::string {} : std::move(refusal);

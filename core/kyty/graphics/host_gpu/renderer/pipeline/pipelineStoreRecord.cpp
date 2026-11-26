@@ -11,6 +11,63 @@
 
 namespace Libs::Graphics {
 
+namespace ShaderStoreFormat {
+namespace {
+
+bool ValidTableModule(const ShaderProgramKey& key, uint32_t cursor, const ShaderModule& module,
+                      std::span<const uint32_t> spirv, std::span<const uint32_t> plain_spirv) {
+	using namespace ShaderRecompiler::IR;
+	const auto valid_spirv = [](std::span<const uint32_t> words) {
+		return words.size() >= 5 && words.front() == 0x07230203u;
+	};
+	const auto& info = module.info;
+	const auto& layout = info.bindings;
+	if ((key.stage != ShaderType::Vertex && key.stage != ShaderType::Pixel) ||
+	    key.static_state.empty() || key.static_state.back() != TableShaderKeyMarker ||
+	    key.guest_traversal || module.guest_traversal || module.bvh != ShaderBvh::None ||
+	    !module.function_code.empty() || module.mesh_task ||
+	    !info.table_mode || info.stage != key.stage || info.shader_hash != key.hash ||
+	    layout.table_block_dwords != 2u || (layout.descriptor_mask >> layout.descriptor_counts.size()) != 0 ||
+	    layout.push_data_start_dword != PushData::StartFor(cursor, layout.ShaderDataDwords()) ||
+	    !valid_spirv(spirv) || (!plain_spirv.empty() && (key.stage != ShaderType::Pixel || !valid_spirv(plain_spirv)))) {
+		return false;
+	}
+	Writer identity;
+	IoAll(identity, key.stage, key.hash, key.user_data_count, key.static_state,
+	      layout.push_data_start_dword, module.specialization);
+	return !identity.failure.Failed() && XXH3_64bits(identity.bytes.data(), identity.bytes.size()) == module.id;
+}
+
+}
+
+bool EncodeTableModuleRecord(const ShaderProgramKey& key, uint32_t cursor, const ShaderModule& module,
+                             const std::vector<uint32_t>& spirv, const std::vector<uint32_t>& plain_spirv,
+                             std::vector<uint8_t>& record) {
+	if (!ValidTableModule(key, cursor, module, spirv, plain_spirv)) return false;
+	ShaderRecompiler::IR::Writer writer;
+	ShaderRecompiler::IR::IoAll(writer, Record::TableModule, key.stage, key.hash, key.user_data_count,
+	                            key.static_state, cursor);
+	IoStoreModuleInfo(writer, module);
+	ShaderRecompiler::IR::IoAll(writer, spirv, plain_spirv);
+	if (writer.failure.Failed()) {
+		NoteStoreRefused(key.stage, key.hash, writer.failure);
+		return false;
+	}
+	record = std::move(writer.bytes);
+	return true;
+}
+
+bool DecodeTableModuleRecord(ShaderRecompiler::IR::Reader& reader, ShaderProgramKey& key,
+                             uint32_t& cursor, ShaderModule& module, std::vector<uint32_t>& spirv,
+                             std::vector<uint32_t>& plain_spirv) {
+	ShaderRecompiler::IR::IoAll(reader, key.stage, key.hash, key.user_data_count, key.static_state, cursor);
+	IoStoreModuleInfo(reader, module);
+	ShaderRecompiler::IR::IoAll(reader, spirv, plain_spirv);
+	return reader.ok && reader.bytes.empty() && ValidTableModule(key, cursor, module, spirv, plain_spirv);
+}
+
+}
+
 bool EncodeModuleRecord(ShaderType stage, uint64_t hash, uint32_t user_data_count,
                         const std::vector<uint32_t>&              static_state,
                         const ShaderRecompiler::IR::ResourcePlan& plan, const ShaderModule& module,
@@ -147,7 +204,7 @@ bool LoadStoredComputeModule(std::istream& input, std::span<const uint8_t> expec
 		Reader reader {.bytes = raw, .allocation_budget = MaxRecordBytes};
 		Record type {};
 		IoAll(reader, type);
-		if (!reader.ok || type > Record::TessellationLayout) {
+		if (!reader.ok || type > Record::TableModule) {
 			return fail("invalid shader store record kind");
 		}
 		if (type != Record::Module) continue;

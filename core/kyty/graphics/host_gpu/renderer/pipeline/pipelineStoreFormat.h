@@ -6,9 +6,13 @@
 #include <xxhash.h>
 #include <zstd.h>
 
+namespace Libs::Graphics {
+struct ShaderProgramKey;
+}
+
 namespace Libs::Graphics::ShaderStoreFormat {
 
-enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout };
+enum class Record : uint8_t { Module, GraphicsPipeline, TessellationLayout, TableModule };
 
 struct Frame {
 	uint32_t compressed_size = 0;
@@ -22,6 +26,13 @@ struct Key {
 	uint32_t user_data_count = 0;
 	std::vector<uint32_t> static_state;
 };
+
+[[nodiscard]] bool EncodeTableModuleRecord(const ShaderProgramKey& key, uint32_t cursor,
+                                           const ShaderModule& module, const std::vector<uint32_t>& spirv,
+                                           const std::vector<uint32_t>& plain_spirv, std::vector<uint8_t>& record);
+[[nodiscard]] bool DecodeTableModuleRecord(ShaderRecompiler::IR::Reader& reader, ShaderProgramKey& key,
+                                           uint32_t& cursor, ShaderModule& module, std::vector<uint32_t>& spirv,
+                                           std::vector<uint32_t>& plain_spirv);
 
 template <class Stream, class Stamp, class Profile, class Limit>
 void IoStoreHeader(Stream& io, Stamp& stamp, Profile& profile, Limit& max_shared_memory) {

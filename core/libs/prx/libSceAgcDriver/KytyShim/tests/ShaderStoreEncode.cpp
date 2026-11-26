@@ -154,6 +154,67 @@ void GraphicsStageDataRoundTrips() {
     Require(reader.ok && reader.bytes.empty() && restored == layout, "stored clip-plane layout changed");
 }
 
+void TableGraphicsModuleRoundTrips() {
+    using namespace ShaderStoreFormat;
+
+    const std::vector<uint32_t> spirv {0x07230203u, 0x00010300u, 0u, 1u, 0u};
+    const std::vector<uint32_t> plain {0x07230203u, 0x00010300u, 0u, 2u, 0u};
+    const std::vector<uint32_t> no_plain;
+    for (const auto stage : {ShaderType::Vertex, ShaderType::Pixel}) {
+        const ShaderProgramKey key {stage, 0x112233u, 4, {3, 9, TableShaderKeyMarker}};
+        const auto cursor = PushData::GraphicsStageCursor(stage);
+        const auto& plain_spirv = stage == ShaderType::Pixel ? plain : no_plain;
+        ShaderModule module;
+        module.info.stage = stage;
+        module.info.shader_hash = key.hash;
+        module.info.table_mode = true;
+        auto& layout = module.info.bindings;
+        layout.table_block_dwords = 2;
+        layout.memory_offset_dword = 3;
+        layout.push_data_start_dword = PushData::StartFor(cursor, layout.ShaderDataDwords());
+        auto& table = module.info.table_plan;
+        table.slots.emplace_back().low = {TablePlan::Operand::Kind::UserData, 2};
+        table.cpu.push_back(1);
+        table.gpu.push_back(1);
+        module.specialization.samplers.emplace_back().indirect_root = 2;
+        if (stage == ShaderType::Vertex) module.vertex_formats.push_back(vk::Format::eR32G32Sfloat);
+        Writer identity;
+        IoAll(identity, key.stage, key.hash, key.user_data_count, key.static_state,
+              layout.push_data_start_dword, module.specialization);
+        module.id = XXH3_64bits(identity.bytes.data(), identity.bytes.size());
+
+        std::vector<uint8_t> bytes;
+        Require(EncodeTableModuleRecord(key, cursor, module, spirv, plain_spirv, bytes),
+                "could not encode a table graphics module");
+        ShaderProgramKey restored_key;
+        uint32_t restored_cursor = 0;
+        ShaderModule restored;
+        std::vector<uint32_t> restored_spirv, restored_plain;
+        const auto decode = [&](std::span<const uint8_t> data) {
+            Reader reader {.bytes = data};
+            Record kind {};
+            IoAll(reader, kind);
+            return kind == Record::TableModule &&
+                   DecodeTableModuleRecord(reader, restored_key, restored_cursor, restored, restored_spirv, restored_plain);
+        };
+        Require(decode(bytes), "could not decode a table graphics module");
+        Require(restored_key == key && restored_cursor == cursor && restored.id == module.id &&
+                    restored.specialization == module.specialization,
+                "the table module lookup identity changed");
+        Require(restored.info.table_mode && restored.info.bindings == layout && restored.info.table_plan == table &&
+                    restored.vertex_formats == module.vertex_formats && restored_spirv == spirv && restored_plain == plain_spirv,
+                "the table module binding layout or program changed");
+        Require(!decode(std::span(bytes).first(bytes.size() - 1)), "accepted a truncated table module");
+        bytes.push_back(0x21u);
+        Require(!decode(bytes), "accepted trailing bytes in a table module");
+        Require(!EncodeTableModuleRecord(key, cursor + 1, module, spirv, plain_spirv, bytes),
+                "accepted the wrong requested data cursor");
+        module.specialization.samplers.front().indirect_root++;
+        Require(!EncodeTableModuleRecord(key, cursor, module, spirv, plain_spirv, bytes),
+                "accepted a table module with the wrong specialization for its ID");
+    }
+}
+
 void StoredComputeModuleSelection() {
     using namespace ShaderStoreFormat;
 
@@ -219,6 +280,7 @@ int main() {
     InstructionOutsideThePlanRefusesThePlan();
     RefusedPlanAbandonsTheStoreEntry();
     GraphicsStageDataRoundTrips();
+    TableGraphicsModuleRoundTrips();
     StoredComputeModuleSelection();
     std::puts("kyty_shim_shader_store_encode: ok");
     return 0;
