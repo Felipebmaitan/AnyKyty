@@ -116,7 +116,8 @@ def write_discovered_store(path, discovered):
         try:
             out.write(struct.pack("<Q", 0x3145444F4359544B))
             for digest, code in sorted(discovered.items()):
-                frame = subprocess.run(["zstd", "-q", "-c"], input=code, stdout=subprocess.PIPE, check=True).stdout
+                frame = subprocess.run(["zstd", "-q", "-c", f"--stream-size={len(code)}"],
+                                       input=code, stdout=subprocess.PIPE, check=True).stdout
                 out.write(struct.pack("<QII", digest, len(code) // 4, len(frame)))
                 out.write(frame)
             out.flush()
