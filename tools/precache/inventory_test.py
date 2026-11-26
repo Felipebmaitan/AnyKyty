@@ -58,9 +58,16 @@ def run(binary, source):
         (assets / 'invalid.kpm').write_bytes(b'other format\n')
         (assets / 'cache.upipelinecache').touch()
         wrapper = source / 'tools/precache/precache'
-        subprocess.run([sys.executable, wrapper, '--binary', binary, 'inventory', assets, output], check=True)
+        image = work / 'image.bin'
+        detached_code = struct.pack('<4I', 0xBF810000, 2, 0, 0)
+        executable_header = shader[:-64] + bytes(64)
+        image.write_bytes(executable_header + detached_code + footer())
+        bindings = work / 'bindings.map'
+        bindings.write_text(f'0 {len(executable_header)}\n')
+        subprocess.run([sys.executable, wrapper, '--binary', binary, 'inventory', assets, output,
+                        '--bindings', image, bindings], check=True)
         counts = json.loads((output / 'report.json').read_text())
-        assert counts['shader_programs'] == 2, counts
+        assert counts['shader_programs'] == 3, counts
         assert counts['creation_records'] == 1, counts
         assert counts['unresolved_containers'] == 1, counts
         assert counts['packaged_manifests'] == 2, counts
@@ -74,14 +81,23 @@ def run(binary, source):
         store = output / 'shaders.code'
         assert store.read_bytes().startswith(struct.pack('<Q', 0x3145444F4359544B))
         recipes = output / 'compute-recipes.txt'
-        marker, recipe = recipes.read_text().splitlines()
-        digest, *fields = recipe.split()
-        assert marker == 'kyty compute recipes 1' and len(digest) == 16
-        assert fields == ['8', '4', '1', '0', '0', '0', '0'], recipe
-        request = struct.pack('<Q8I', int(digest, 16), *map(int, fields), 4) + shader[-64:-48]
-        subprocess.run([binary, '--prepare-compute'], input=request, cwd=work, check=True)
-        assert 'cs code=' + digest in (work / 'compute.kpm').read_text()
-        assert (work / 'compute-0.spv').read_bytes().startswith(struct.pack('<I', 0x07230203))
+        marker, *compute = recipes.read_text().splitlines()
+        assert marker == 'kyty compute recipes 1' and len(compute) == 2
+        digests = {recipe.split()[0] for recipe in compute}
+        assert len(digests) == 2
+        for recipe in compute:
+            digest, *fields = recipe.split()
+            assert fields == ['8', '4', '1', '0', '0', '0', '0'], recipe
+            arguments = struct.pack('<Q8I', int(digest, 16), *map(int, fields), 4)
+            for code in (shader[-64:-48], detached_code):
+                prep = subprocess.run([binary, '--prepare-compute'], input=arguments + code, cwd=work)
+                if prep.returncode == 0:
+                    break
+                assert prep.returncode == 64
+            else:
+                raise AssertionError(f'No known payload matched recipe {digest}')
+            assert 'cs code=' + digest in (work / 'compute.kpm').read_text()
+            assert (work / 'compute-0.spv').read_bytes().startswith(struct.pack('<I', 0x07230203))
         failed = subprocess.run([binary, '--inventory', assets, output], capture_output=True)
         assert failed.returncode != 0
         assert (output / 'creation-records.bin').read_bytes() == shader

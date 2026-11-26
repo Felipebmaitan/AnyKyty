@@ -135,12 +135,24 @@ using namespace Libs::Graphics;
 struct NoImageHeap final: ShaderRecompiler::IR::ImageHeapSource {
 	bool Acquire(const ShaderRecompiler::IR::ImageHeapRequest&, ShaderRecompiler::IR::ImageHeapView&) override { return false; }
 };
-int InventoryShaders(const char* assets, const char* destination) {
+int InventoryShaders(const char* assets, const char* destination, std::span<char*> input_images) {
 	std::error_code error;
 	const auto root = std::filesystem::canonical(assets, error);
 	if (error || !std::filesystem::is_directory(root, error)) {
 		std::fprintf(stderr, "kyty_precache: inventory requires a readable assets directory\n");
 		return 66;
+	}
+	std::vector<std::filesystem::path> images;
+	for (const auto* image: input_images) {
+		auto path = std::filesystem::canonical(image, error);
+		if (error || !std::filesystem::is_regular_file(path, error)) {
+			std::fprintf(stderr, "kyty_precache: inventory image must be a readable file\n");
+			return 66;
+		}
+		if (std::mismatch(root.begin(), root.end(), path.begin(), path.end()).first != root.end() &&
+		    std::ranges::find(images, path) == images.end()) {
+			images.push_back(std::move(path));
+		}
 	}
 	const auto output = std::filesystem::weakly_canonical(destination, error);
 	if (error || std::mismatch(root.begin(), root.end(), output.begin(), output.end()).first == root.end() ||
@@ -157,7 +169,7 @@ int InventoryShaders(const char* assets, const char* destination) {
 	std::ofstream shipped_recipes(shipped_path, std::ios::binary);
 	std::ofstream report(report_path);
 	const bool written = code_store && creation_records && shipped_recipes && report &&
-	                     WriteShaderInventory(root, code_store, creation_records, shipped_recipes, report);
+	                     WriteShaderInventory(root, images, code_store, creation_records, shipped_recipes, report);
 	code_store.close();
 	creation_records.close();
 	shipped_recipes.close();
@@ -178,8 +190,8 @@ int PrepareComputeRecipe(const char* signatures);
 
 int main(int argc, char** argv) {
 	if (argc > 1 && std::strcmp(argv[1], "--inventory") == 0) {
-		if (argc == 4) return InventoryShaders(argv[2], argv[3]);
-		std::fprintf(stderr, "usage: kyty_precache --inventory <assets-directory> <new-output-directory>\n");
+		if (argc >= 4) return InventoryShaders(argv[2], argv[3], {argv + 4, static_cast<size_t>(argc - 4)});
+		std::fprintf(stderr, "usage: kyty_precache --inventory <assets-directory> <new-output-directory> [image ...]\n");
 		return 64;
 	}
 	if ((argc == 2 || argc == 3) && std::strcmp(argv[1], "--prepare-compute") == 0) {

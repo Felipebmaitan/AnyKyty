@@ -2063,7 +2063,8 @@ struct ShaderScanStats {
 template <typename Search, typename Stop, typename Known, typename Provided, typename Recipe>
 ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::stop_token& stop,
                                 Search&& search, Stop&& nothing_missing, Known&& known, Provided&& provided,
-                                Recipe&& recipe, bool exhaustive) {
+                                Recipe&& recipe, bool exhaustive,
+                                std::span<const std::filesystem::path> images = {}) {
 	constexpr uint32_t SampleFiles = 32;
 	constexpr uint64_t SampleBytes = 256ull << 20u;
 	constexpr uint32_t Piece   = 64u << 20u;
@@ -2174,6 +2175,26 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 		if (done != size) stats.read_failures++;
 		return done == size;
 	};
+	const auto scan_file = [&](const std::filesystem::path& path, bool manifest) {
+		Common::File file;
+		if (!file.Open(path, Common::File::Mode::Read)) {
+			stats.read_failures++;
+			return;
+		}
+		files++;
+		const auto size = file.Size();
+		if (manifest) {
+			if (size <= Piece && read_file(file, 0, size, data)) recipe(data);
+			else stats.unresolved_containers++;
+			return;
+		}
+		stats.raw_files++;
+		if (read_run(file, 0, size, 0, size, Piece, 0).end != size) stats.read_failures++;
+	};
+	for (const auto& image: images) {
+		if (stop.stop_requested() || nothing_missing()) break;
+		scan_file(image, false);
+	}
 	const auto search_unreal = [&](const std::filesystem::path& path, const std::string& extension) {
 		Common::File file;
 		if (!file.Open(path, Common::File::Mode::Read)) {
@@ -2448,20 +2469,7 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 				continue;
 			}
 			if (exhaustive) {
-				Common::File file;
-				if (!file.Open(path, Common::File::Mode::Read)) {
-					stats.read_failures++;
-					continue;
-				}
-				files++;
-				const auto size = file.Size();
-				if (extension == ".kpm") {
-					if (size <= Piece && read_file(file, 0, size, data)) recipe(data);
-					else stats.unresolved_containers++;
-					continue;
-				}
-				stats.raw_files++;
-				if (read_run(file, 0, size, 0, size, Piece, 0).end != size) stats.read_failures++;
+				scan_file(path, extension == ".kpm");
 				continue;
 			}
 			auto& kind = kinds[extension];
@@ -2530,7 +2538,8 @@ ShaderScanStats ScanShaderFiles(const std::filesystem::path& root, const std::st
 
 }
 
-bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_store,
+bool WriteShaderInventory(const std::filesystem::path& root, std::span<const std::filesystem::path> images,
+                          std::ostream& code_store,
                           std::ostream& creation_records, std::ostream& shipped_recipes, std::ostream& report) {
 	code_store.write(reinterpret_cast<const char*>(&CodeStoreMagic), sizeof(CodeStoreMagic));
 	std::unordered_set<uint64_t> programs;
@@ -2585,7 +2594,7 @@ bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_
 	};
 	const auto found_count = [&] { return programs.size(); };
 	const auto should_stop = [&] { return !code_store || !creation_records; };
-	const auto stats = ScanShaderFiles(root, {}, search, should_stop, found_count, found_count, recipe, true);
+	const auto stats = ScanShaderFiles(root, {}, search, should_stop, found_count, found_count, recipe, true, images);
 	const auto serialized = SaveManifest(packaged);
 	shipped_recipes.write(reinterpret_cast<const char*>(serialized.data()), serialized.size());
 	report << fmt::format("{{\"shader_programs\":{},\"creation_records\":{},\"files_read\":{},\"bytes_read\":{},"

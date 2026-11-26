@@ -70,7 +70,8 @@ struct PipelineManifest {
 	std::vector<std::pair<uint64_t, ShaderTessellationInputInfo>> tessellation_layouts;
 };
 
-bool WriteShaderInventory(const std::filesystem::path& root, std::ostream& code_store,
+bool WriteShaderInventory(const std::filesystem::path& root, std::span<const std::filesystem::path> images,
+                          std::ostream& code_store,
                           std::ostream& creation_records, std::ostream& shipped_recipes, std::ostream& report);
 
 void NormalizeManifestInput(ManifestModule& module);

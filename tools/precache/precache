@@ -64,12 +64,16 @@ def zstd_decoder():
 
 
 def inventory(args, binary):
-    scan = subprocess.run([binary, '--inventory', args.assets, args.output])
+    images = [*args.image, *(image for image, _ in args.bindings)]
+    scan = subprocess.run([binary, '--inventory', args.assets, args.output, *images])
     if scan.returncode != 0:
         return scan.returncode
     tool = Path(__file__).resolve().parents[1] / 'compute_recipes.py'
-    return subprocess.run([sys.executable, tool, args.output / 'shaders.code', args.output / 'creation-records.bin',
-                           '--output', args.output / 'compute-recipes.txt']).returncode
+    command = [sys.executable, tool, args.output / 'shaders.code', args.output / 'creation-records.bin',
+               '--output', args.output / 'compute-recipes.txt']
+    for image, mapping in args.bindings:
+        command.extend(('--bindings', image, mapping))
+    return subprocess.run(command).returncode
 
 
 def prepare(args, binary):
@@ -209,6 +213,9 @@ def main():
     scan = commands.add_parser('inventory', help='scan title files and derive compute recipes without starting the title')
     scan.add_argument('assets', type=Path)
     scan.add_argument('output', type=Path)
+    scan.add_argument('--image', type=Path, action='append', default=[], help='scan an executable outside the assets directory')
+    scan.add_argument('--bindings', type=Path, nargs=2, action='append', default=[], metavar=('IMAGE', 'MAP'),
+                      help='resolve detached shader headers with verified creation argument file offsets')
     prep = commands.add_parser('prepare')
     prep.add_argument('store', type=Path)
     prep.add_argument('recipes', type=Path)
