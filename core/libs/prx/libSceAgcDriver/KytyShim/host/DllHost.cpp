@@ -120,7 +120,7 @@ KytyDllDisplayBuffer ToSeam(const AgcDriver::DisplayBuffer& buffer) {
 }
 
 KytyDllWindow ToSeam(const AgcDriver::PresentationWindow& window) {
-    return {window.context, window.extensions.data(), window.extensions.size(), window.createSurface, window.getDrawableSize, window.width, window.height};
+    return {window.context, window.extensions.data(), window.extensions.size(), window.createSurface, window.getDrawableSize, window.width, window.height, window.idle, window.pumpEvents, window.recentFlip};
 }
 
 KytyDllKernelEvent ToSeam(const KernelEvent& event) {

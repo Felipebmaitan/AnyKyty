@@ -143,7 +143,7 @@ KytyDllDisplayBuffer ToBuffer(const AgcDriver::DisplayBuffer& buffer) {
 }
 
 AgcDriver::PresentationWindow ToWindow(const KytyDllWindow& window) {
-    return {window.context, std::span<const char* const>(window.extensions, window.extension_count), window.create_surface, window.get_drawable_size, window.width, window.height, nullptr};
+    return {window.context, std::span<const char* const>(window.extensions, window.extension_count), window.create_surface, window.get_drawable_size, window.width, window.height, nullptr, window.idle, window.pump_events, window.recent_flip};
 }
 
 std::string HostPath(std::size_t (*resolve)(const char*, char*, std::size_t), const char* path) {

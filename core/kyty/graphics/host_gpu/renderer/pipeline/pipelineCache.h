@@ -774,7 +774,6 @@ private:
 		std::chrono::steady_clock::time_point ended;
 #if defined(ANYPS5_KYTY)
 		uint64_t                              hash = 0;
-		const char*                           what = nullptr;
 		std::chrono::steady_clock::time_point hash_since;
 #endif
 	};
@@ -801,6 +800,12 @@ private:
 	PipelineStall      m_stall;
 	[[nodiscard]] PipelineStall GetPipelineStall() const;
 #if defined(ANYPS5_KYTY)
+	struct ShaderWait {
+		const StallScope* scope;
+		uint64_t hash;
+		std::chrono::steady_clock::time_point since;
+	};
+	std::vector<ShaderWait> m_shader_waits;
 	struct StallStats {
 		uint64_t count      = 0;
 		uint64_t total_ns   = 0;

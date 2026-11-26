@@ -241,12 +241,7 @@ bool GuestGpu::PostReadbackCommand(Common::UniqueFunction<void>&& command) {
 	if (!m_pipelined || IsGpuThread()) {
 		return false;
 	}
-	{
-		std::lock_guard lock(m_urgent_mutex);
-		m_urgent_commands.push_back(std::move(command));
-		m_urgent_pending.fetch_add(1, std::memory_order_release);
-	}
-	(m_resolving ? m_resolved : m_operations).Interrupt();
+	PostUrgentCommand(std::move(command), false);
 	return true;
 }
 
@@ -269,17 +264,21 @@ uint64_t GuestGpu::WaitForOrderedOperations(uint64_t begin, uint64_t end) {
 
 void GuestGpu::PostUrgentCommandSync(Common::UniqueFunction<void>&& command, bool drain_copies) {
 	std::binary_semaphore done {0};
+	PostUrgentCommand([operation = std::move(command), &done]() mutable {
+		operation();
+		done.release();
+	}, drain_copies);
+	done.acquire();
+}
+
+void GuestGpu::PostUrgentCommand(Common::UniqueFunction<void>&& command, bool drain_copies) {
 	{
 		std::lock_guard lock(m_urgent_mutex);
-		m_urgent_commands.push_back([operation = std::move(command), &done]() mutable {
-			operation();
-			done.release();
-		});
+		m_urgent_commands.push_back(std::move(command));
 		m_urgent_drains += drain_copies ? 1 : 0;
 		m_urgent_pending.fetch_add(1, std::memory_order_release);
 	}
 	(m_resolving ? m_resolved : m_operations).Interrupt();
-	done.acquire();
 }
 
 void GuestGpu::RunUrgentCommands() {

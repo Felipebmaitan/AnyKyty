@@ -7,8 +7,8 @@
 
 namespace KytyShim::CompileNotice {
 
-bool Active() noexcept;
-void LayOut(AgcDriver::OverlayLayout& layout, VkExtent2D extent, bool loading);
+std::uint64_t Revision() noexcept;
+bool LayOut(AgcDriver::OverlayLayout& layout, VkExtent2D extent, bool loading);
 
 }
 

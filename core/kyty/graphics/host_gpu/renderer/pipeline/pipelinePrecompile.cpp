@@ -15,7 +15,6 @@
 #include <fmt/format.h>
 #include <mutex>
 #include <optional>
-#include <string_view>
 #include <utility>
 
 namespace Libs::Graphics {
@@ -62,14 +61,12 @@ PipelineCache::StallScope::StallScope(PipelineCache& cache): m_cache(cache) {
 PipelineCache::StallScope::StallScope(PipelineCache& cache, const char* what, uint64_t hash, const char* why)
     : StallScope(cache) {
 	PipelineRouteNote() = nullptr;
-	m_started = std::chrono::steady_clock::now();
 	m_what    = what;
 	m_hash    = hash;
 	m_why     = why;
 	std::scoped_lock lock(cache.m_stall_mutex);
-	cache.m_stall.hash       = hash;
-	cache.m_stall.what       = what;
-	cache.m_stall.hash_since = m_started;
+	m_started = std::chrono::steady_clock::now();
+	if (hash != 0) cache.m_shader_waits.push_back({this, hash, m_started});
 }
 
 static const char* ComputeWrites(const ShaderModule& module) {
@@ -96,9 +93,8 @@ PipelineCache::StallScope::~StallScope() {
 		std::scoped_lock lock(m_cache.m_stall_mutex);
 		if (--m_cache.m_stall.threads == 0) {
 			m_cache.m_stall.ended = now;
-			m_cache.m_stall.hash  = 0;
-			m_cache.m_stall.what  = nullptr;
 		}
+		if (m_hash != 0) std::erase_if(m_cache.m_shader_waits, [this](const auto& wait) { return wait.scope == this; });
 		if (m_what != nullptr) {
 			ns           = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_started).count());
@@ -188,7 +184,14 @@ void PipelineCache::LogStallStats(bool force) {
 
 PipelineCache::PipelineStall PipelineCache::GetPipelineStall() const {
 	std::scoped_lock lock(m_stall_mutex);
-	return m_stall;
+	auto stall = m_stall;
+#if defined(ANYPS5_KYTY)
+	if (!m_shader_waits.empty()) {
+		stall.hash = m_shader_waits.front().hash;
+		stall.hash_since = m_shader_waits.front().since;
+	}
+#endif
+	return stall;
 }
 
 void PipelineCache::StartPrecompile() {
@@ -258,8 +261,8 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 		}
 #endif
 		const auto e     = estimate();
-		const auto now   = Clock::now();
 		const auto stall = GetPipelineStall();
+		const auto now   = Clock::now();
 		const auto left  = std::max(e.pending, stall.threads);
 		const auto creations = GetDriverCreations(SlowSeconds);
 		const bool waits_slow = stall.threads != 0 && now - stall.since >= std::chrono::duration<double>(SlowSeconds);
@@ -388,7 +391,6 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 #if defined(ANYPS5_KYTY)
 		if (stall.threads != 0 && stall.hash != 0) {
 			notice.waiting_hash     = stall.hash;
-			notice.waiting_pipeline = stall.what != nullptr && std::string_view(stall.what).starts_with("graphics");
 			notice.waiting_seconds  = static_cast<uint32_t>(seconds(now - stall.hash_since));
 		}
 #endif

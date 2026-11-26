@@ -21,7 +21,6 @@ struct PrecompileNotice {
 	uint32_t waited_pipelines = 0;
 	uint32_t seconds_waited   = 0;
 	uint64_t waiting_hash     = 0;
-	bool     waiting_pipeline = false;
 	uint32_t waiting_seconds  = 0;
 };
 

@@ -52,6 +52,7 @@ APS5_RUN_REPORT_COMPONENT("libSceVideoOut")
 namespace {
 
 constexpr std::uint64_t FLIP_ROOM_WAIT_MICROS = 60000000;
+thread_local AgcDriver::FrameTiming::Clock::time_point lastMainFlip;
 constexpr std::uint64_t PRESENT_POLL_MICROS = 10000;
 constexpr std::int64_t FRAME_LIMIT_SLICE_NANOS = 20000000;
 
@@ -733,7 +734,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         timing.Mark("frame_limit");
         OnMainThread([&] { window.Ensure(req.width, req.height); });
         const auto extensions = windowExtensions(window.Handle());
-        const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, req.width, req.height, req.timing};
+        const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, req.width, req.height, req.timing, nullptr, [] { OnMainThread([] { SDL_PumpEvents(); }); }};
         timing.Mark("window_prepare");
         const auto gpuReady = [](void* context) {
             auto& request = *static_cast<FlipRequest*>(context);
@@ -814,6 +815,7 @@ std::optional<AgcDriver::DisplayBuffer> VideoOutDriver::overlayPlane() {
 }
 
 void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& started) {
+    AgcDriver::PresentationIdle idle = nullptr;
     try {
         OnMainThread([&] {
             window.Ensure(VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT);
@@ -821,7 +823,9 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
         });
         hdrProbe.Poll(window.Handle());
         const auto extensions = windowExtensions(window.Handle());
-        AgcDriverAttachWindow_nid_postfix({window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT, nullptr});
+        AgcDriverAttachWindow_nid_postfix({window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT, nullptr, &idle, nullptr, [] {
+            return AgcDriver::FrameTiming::Clock::now() - lastMainFlip < std::chrono::milliseconds(300);
+        }});
         hdrGeneration = AgcDriver::CurrentHostHdr().generation;
     } catch (...) {
         hdrProbe.Release();
@@ -865,10 +869,6 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 flipQueue->changed.WaitUntil(lock, TimedWait::DeadlineNanos(PRESENT_POLL_MICROS), [&] { return token.stop_requested() || flipQueue->failure || !flipQueue->requests.empty(); });
                 if (flipQueue->failure) std::rethrow_exception(flipQueue->failure);
                 if (token.stop_requested()) break;
-                if (!flipQueue->requests.empty()) {
-                    current = std::move(flipQueue->requests.front());
-                    flipQueue->requests.pop_front();
-                }
             }
 
             const bool quit = OnMainThread([&] {
@@ -900,6 +900,13 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
             ModalDialogSetPresenter_nid_postfix(window.Handle() != nullptr);
             pollHostHdr();
             OnMainThread([&] { mouseInput->UpdateCapture(!padInput->MouseModeEnabled()); });
+            {
+                std::lock_guard lock(flipQueue->mutex);
+                if (!flipQueue->requests.empty()) {
+                    current = std::move(flipQueue->requests.front());
+                    flipQueue->requests.pop_front();
+                }
+            }
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
@@ -919,6 +926,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                     mouseInput->SetPresentation(current->width, current->height, presented.width, presented.height);
                 }
                 const auto finished = AgcDriver::FrameTiming::Clock::now();
+                if (current->cfg->busType == VIDEO_OUT_BUS_TYPE_MAIN) lastMainFlip = finished;
                 AgcDriver::FrameTiming::Clock::duration interval{};
                 {
                     std::lock_guard lock(current->cfg->mutex);
@@ -929,6 +937,12 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
 #if APS5_ENABLE_TIMING_LOG
                 timingLog->Enqueue(current->timing->Capture(current->outputHandle, current->index, current->flipArg, finished, interval));
 #endif
+            } else if (idle != nullptr) {
+                idle([](void* context) {
+                    auto& queue = *static_cast<FlipQueue*>(context);
+                    std::lock_guard lock(queue.mutex);
+                    return queue.stopping || queue.failure || !queue.requests.empty();
+                }, flipQueue.get());
             }
             if (current) {
                 current.reset();

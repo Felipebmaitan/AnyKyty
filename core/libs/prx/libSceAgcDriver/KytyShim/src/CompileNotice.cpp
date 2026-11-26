@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
@@ -138,7 +139,6 @@ struct Notice {
     Libs::Graphics::PrecompileNotice data;
     Clock::time_point since;
     std::uint64_t waitingHash = 0;
-    bool waitingPipeline = false;
     std::uint32_t waitingSeconds = 0;
     Clock::time_point waitingAt;
 };
@@ -161,6 +161,14 @@ struct NoticeState {
 NoticeState& State() {
     static auto* state = new NoticeState;
     return *state;
+}
+
+std::atomic<std::uint64_t> visualRevision{0};
+
+void PublishVisibility(const NoticeState& state) {
+    const bool visible = state.notice.has_value() || state.manifest.has_value();
+    const auto revision = visualRevision.load(std::memory_order_relaxed);
+    if (visible != ((revision & 1u) != 0)) visualRevision.store(revision + 1, std::memory_order_release);
 }
 
 void Estimate(Manifest& manifest, Clock::time_point now) {
@@ -237,7 +245,6 @@ struct Snapshot {
     std::uint64_t compiled = 0;
     std::optional<double> remaining;
     std::uint64_t waitingHash = 0;
-    bool waitingPipeline = false;
     std::uint32_t waitingSeconds = 0;
     bool boot = false;
 };
@@ -269,7 +276,6 @@ std::optional<Snapshot> Take() {
         }
         if (notice.waitingHash != 0 && now - notice.waitingAt < WaitingLinger) {
             shot.waitingHash = notice.waitingHash;
-            shot.waitingPipeline = notice.waitingPipeline;
             shot.waitingSeconds = notice.waitingSeconds;
         }
     }
@@ -282,7 +288,7 @@ std::string Counts(const Snapshot& shot) {
 
 std::string Waiting(const Snapshot& shot) {
     if (shot.waitingHash == 0) return {};
-    return std::string("Waiting for ") + (shot.waitingPipeline ? "pipeline " : "shader ") + Hex(shot.waitingHash) + " (" + std::to_string(shot.waitingSeconds) + " s)";
+    return std::string("Waiting for shader ") + Hex(shot.waitingHash) + " (" + std::to_string(shot.waitingSeconds) + " s)";
 }
 
 std::string Remaining(const Snapshot& shot) {
@@ -367,20 +373,19 @@ void LayOutCompact(AgcDriver::OverlayLayout& layout, const Snapshot& shot, std::
 
 }
 
-bool Active() noexcept {
-    auto& state = State();
-    std::lock_guard lock(state.mutex);
-    return state.notice.has_value() || state.manifest.has_value();
+std::uint64_t Revision() noexcept {
+    return visualRevision.load(std::memory_order_acquire);
 }
 
-void LayOut(AgcDriver::OverlayLayout& layout, VkExtent2D extent, bool loading) {
-    if (extent.width == 0 || extent.height == 0) return;
+bool LayOut(AgcDriver::OverlayLayout& layout, VkExtent2D extent, bool loading) {
+    if (extent.width == 0 || extent.height == 0) return false;
     const auto shot = Take();
-    if (!shot.has_value()) return;
+    if (!shot.has_value()) return false;
     const auto width = static_cast<std::int32_t>(extent.width);
     const auto height = static_cast<std::int32_t>(extent.height);
     if (loading || shot->boot) LayOutScreen(layout, *shot, width, height);
     else LayOutCompact(layout, *shot, width, height);
+    return true;
 }
 
 }
@@ -400,6 +405,7 @@ void ShowManifestProgress(const ManifestProgress& progress) {
     if (!state.manifest.has_value()) state.manifest = KytyShim::CompileNotice::Manifest{progress, now, {}, std::nullopt, now};
     state.manifest->data = progress;
     KytyShim::CompileNotice::Estimate(*state.manifest, now);
+    KytyShim::CompileNotice::PublishVisibility(state);
 }
 
 void HideManifestProgress() {
@@ -407,6 +413,7 @@ void HideManifestProgress() {
     std::lock_guard lock(state.mutex);
     if (state.manifest.has_value()) state.manifestHidden = true;
     state.manifest.reset();
+    KytyShim::CompileNotice::PublishVisibility(state);
 }
 
 void ShowPrecompileNotice(const PrecompileNotice& notice) {
@@ -414,14 +421,15 @@ void ShowPrecompileNotice(const PrecompileNotice& notice) {
     std::lock_guard lock(state.mutex);
     if (!notice.visible) {
         state.notice.reset();
+        KytyShim::CompileNotice::PublishVisibility(state);
         return;
     }
     const auto now = KytyShim::CompileNotice::Clock::now();
     if (!state.notice.has_value()) state.notice = KytyShim::CompileNotice::Notice{notice, now};
     state.notice->data = notice;
+    KytyShim::CompileNotice::PublishVisibility(state);
     if (notice.waiting_hash != 0) {
         state.notice->waitingHash = notice.waiting_hash;
-        state.notice->waitingPipeline = notice.waiting_pipeline;
         state.notice->waitingSeconds = notice.waiting_seconds;
         state.notice->waitingAt = now;
     }
@@ -431,6 +439,7 @@ void HidePrecompileNotice() {
     auto& state = KytyShim::CompileNotice::State();
     std::lock_guard lock(state.mutex);
     state.notice.reset();
+    KytyShim::CompileNotice::PublishVisibility(state);
 }
 
 }

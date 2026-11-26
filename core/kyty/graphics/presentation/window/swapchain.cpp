@@ -31,6 +31,8 @@
 #include <fmt/format.h>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -234,16 +236,16 @@ void Presenter::Frame::Clear(CommandBuffer& command_buffer, const vk::ClearColor
 
 class Swapchain final {
 public:
-	enum class Status : uint8_t { Success, Recreate, SurfaceLost };
+	enum class Status : uint8_t { Success, Busy, Recreate, SurfaceLost };
 
 	explicit Swapchain(WindowContext& window): m_window(window) {}
 	~Swapchain();
 	KYTY_CLASS_NO_COPY(Swapchain);
 
 	void                 Create();
-	void                 Recreate(bool surface_lost = false);
-	[[nodiscard]] bool   NeedsResize() const;
-	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler);
+	bool                 Recreate(CommandScheduler& scheduler, bool surface_lost, bool repeat);
+	[[nodiscard]] Status CheckExtent() const;
+	[[nodiscard]] Status AcquireNextImage(CommandScheduler& scheduler, bool repeat);
 	[[nodiscard]] bool   PrepareSystemOverlay();
 	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
 	                               const Presenter::Layer& overlay, bool draw_system_overlay);
@@ -255,6 +257,7 @@ public:
 	}
 	[[nodiscard]] vk::Format Format() const noexcept { return m_format; }
 	[[nodiscard]] bool IsHdrSupported() const noexcept { return m_hdr_supported.load(); }
+	[[nodiscard]] bool Suboptimal() const { return m_suboptimal; }
 	bool SetHdr(bool hdr) {
 		const bool changed = m_hdr_active != (hdr && IsHdrSupported());
 		m_hdr_requested = hdr;
@@ -263,7 +266,8 @@ public:
 
 private:
 	vk::SurfaceFormatKHR SelectFormat();
-	void Destroy();
+	void Destroy(bool wait_queue = true);
+	void ReleaseRetired();
 	void EnsureFsrPipelines();
 	void DrawFsr(vk::CommandBuffer command, Presenter::Frame* source,
 	             const vk::Rect2D& game_rect);
@@ -287,6 +291,17 @@ private:
 	std::vector<vk::Semaphore>     m_image_acquired;
 	std::vector<uint64_t>          m_image_acquired_ticks;
 	std::vector<vk::Semaphore>     m_render_complete;
+	struct Retired {
+		vk::SwapchainKHR handle;
+		std::vector<vk::Semaphore> semaphores;
+		vk::SurfaceKHR surface;
+	};
+	std::vector<Retired>           m_retired;
+	vk::SwapchainKHR               m_old_handle = nullptr;
+	std::optional<uint32_t>        m_first_present;
+	uint64_t                       m_retire_tick = 0;
+	std::vector<vk::Fence>         m_present_fences;
+	bool                           m_suboptimal = false;
 	std::unique_ptr<SystemOverlay> m_system_overlay;
 	struct UpscaleSlot {
 		VulkanImage   image {};
@@ -324,12 +339,14 @@ struct Presenter::Impl {
 		frames.Initialize(swapchain.ImageCount(), swapchain.Format());
 	}
 
-	void RecoverSwapchain(Swapchain::Status status) {
-		LOGF("Recovering Vulkan swapchain%s\n",
-		     status == Swapchain::Status::SurfaceLost ? " and surface" : "");
+	bool RecoverSwapchain(bool repeat) {
+		if (!swapchain.Recreate(present_scheduler, recovery == Swapchain::Status::SurfaceLost, repeat)) {
+			return false;
+		}
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::SwapchainRecreations);
-		swapchain.Recreate(status == Swapchain::Status::SurfaceLost);
 		frames.SetFormat(swapchain.Format());
+		recovery = Swapchain::Status::Success;
+		return true;
 	}
 
 	Image& ResolveSurface(const ImageInfo& info) {
@@ -352,14 +369,15 @@ struct Presenter::Impl {
 		cache.UpdateImage(image_id);
 		return image;
 	}
-	void Present(bool repeat = false);
+	bool Present(bool (*flip_ready)(void*) = nullptr, void* context = nullptr);
 
 	RenderContext&        renderer;
 	WindowContext&        window;
 	Swapchain             swapchain;
 	CommandScheduler      present_scheduler;
 	FramePool             frames;
-	Common::Mutex         present_mutex;
+	std::mutex            present_mutex;
+	Swapchain::Status     recovery = Swapchain::Status::Success;
 	std::array<Layer, 2>  layers {};
 	std::atomic<uint64_t> presented_overlay_revision {0};
 };
@@ -407,8 +425,6 @@ void Swapchain::Create() {
 		Common::LockGuard lock(m_window.mutex);
 		m_window_extent = {graphics.screen_width, graphics.screen_height};
 	}
-	EXIT_IF(m_window_extent.width == 0);
-	EXIT_IF(m_window_extent.height == 0);
 	m_window.RefreshSurfaceCapabilities();
 	const auto& surface = m_window.surface_capabilities;
 	EXIT_NOT_IMPLEMENTED(surface.formats.empty());
@@ -442,7 +458,7 @@ void Swapchain::Create() {
 		EXIT("swapchain format cannot be a blit destination: format=%d\n",
 		     static_cast<int>(m_format));
 	}
-	if (m_extent.width == 0 || m_extent.height == 0) {
+	if (m_extent.width == 0 || m_extent.height == 0 || m_window_extent.width == 0 || m_window_extent.height == 0) {
 		return;
 	}
 
@@ -474,6 +490,7 @@ void Swapchain::Create() {
 		LOGF("warning: requested present mode is unavailable; falling back to Fifo\n");
 		create_info.presentMode = vk::PresentModeKHR::eFifo;
 	}
+	create_info.oldSwapchain = std::exchange(m_old_handle, nullptr);
 	create_info.clipped = VK_TRUE;
 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
 	                     "vkCreateSwapchainKHR");
@@ -524,6 +541,13 @@ void Swapchain::Create() {
 	m_image_acquired_ticks.assign(m_images.size(), 0);
 	m_render_complete.resize(m_images.size());
 	m_upscale_slots.resize(m_images.size());
+	if (graphics.present_fences_enabled) {
+		m_present_fences.resize(m_images.size());
+		const vk::FenceCreateInfo info {.flags = vk::FenceCreateFlagBits::eSignaled};
+		for (auto& fence: m_present_fences) {
+			RequireVulkanSuccess(graphics.device.createFence(&info, nullptr, &fence), "create presentation fence");
+		}
+	}
 	for (size_t i = 0; i < m_images.size(); i++) {
 		RequireVulkanSuccess(
 		    graphics.device.createSemaphore(&semaphore_info, nullptr, &m_image_acquired[i]),
@@ -536,19 +560,38 @@ void Swapchain::Create() {
 
 Swapchain::~Swapchain() {
 	Destroy();
+	ReleaseRetired();
 }
 
-void Swapchain::Destroy() {
+void Swapchain::ReleaseRetired() {
+	auto& graphics = m_window.graphic_ctx;
+	for (const auto& old: m_retired) {
+		for (auto semaphore: old.semaphores) graphics.device.destroySemaphore(semaphore, nullptr);
+		graphics.device.destroySwapchainKHR(old.handle, nullptr);
+	}
+	for (const auto& old: m_retired) {
+		if (old.surface) graphics.instance.destroySurfaceKHR(old.surface, nullptr);
+	}
+	m_retired.clear();
+	m_retire_tick = 0;
+}
+
+void Swapchain::Destroy(bool wait_queue) {
 	if (m_handle == nullptr && m_image_acquired.empty() && m_render_complete.empty() &&
 	    m_image_views.empty()) {
 		return;
 	}
 	auto& graphics = m_window.graphic_ctx;
 
-	{
+	if (wait_queue) {
 		Common::LockGuard queue_lock(graphics.queue_mutex);
 		RequireVulkanSuccess(graphics.queue.waitIdle(), "wait for swapchain queue");
 	}
+	for (auto fence: m_present_fences) {
+		if (wait_queue) RequireVulkanSuccess(graphics.device.waitForFences(1, &fence, VK_TRUE, UINT64_MAX), "wait for presentation");
+		graphics.device.destroyFence(fence, nullptr);
+	}
+	m_present_fences.clear();
 	if (m_system_overlay != nullptr) {
 		m_system_overlay->ReleaseVulkan();
 	}
@@ -620,9 +663,30 @@ void Swapchain::Destroy() {
 	m_render_complete.clear();
 }
 
-void Swapchain::Recreate(bool surface_lost) {
-	Destroy();
+bool Swapchain::Recreate(CommandScheduler& scheduler, bool surface_lost, bool repeat) {
+	if (!m_image_acquired_ticks.empty()) {
+		const auto last = *std::max_element(m_image_acquired_ticks.begin(), m_image_acquired_ticks.end());
+		if (repeat && !scheduler.IsFree(last)) return false;
+		scheduler.Wait(last);
+	}
+	auto device = m_window.graphic_ctx.device;
+	for (auto fence: m_present_fences) {
+		const auto result = device.waitForFences(1, &fence, VK_TRUE, repeat ? 0 : UINT64_MAX);
+		if (result == vk::Result::eTimeout) return false;
+		RequireVulkanSuccess(result, "wait for retired presentation");
+	}
+	if (m_handle && m_present_fences.empty()) {
+		m_old_handle = m_handle;
+		m_retired.push_back({std::exchange(m_handle, nullptr), std::move(m_render_complete), nullptr});
+	}
+	m_first_present.reset();
+	m_retire_tick = 0;
+	m_suboptimal = false;
+	Destroy(false);
 	if (surface_lost) {
+		if (m_old_handle) {
+			m_retired.back().surface = std::exchange(m_window.surface, nullptr);
+		}
 #if defined(__APPLE__)
 		EXIT_IF(!SDL_RunOnMainThread(
 		    [](void* window) { static_cast<WindowContext*>(window)->RecreateSurface(); }, &m_window,
@@ -632,24 +696,40 @@ void Swapchain::Recreate(bool surface_lost) {
 #endif
 	}
 	Create();
+	return true;
 }
 
-bool Swapchain::NeedsResize() const {
+Swapchain::Status Swapchain::CheckExtent() const {
 	Common::LockGuard lock(m_window.mutex);
-	return m_handle == nullptr || m_window_extent.width != m_window.graphic_ctx.screen_width ||
-	       m_window_extent.height != m_window.graphic_ctx.screen_height;
+	const vk::Extent2D extent {m_window.graphic_ctx.screen_width, m_window.graphic_ctx.screen_height};
+	if (extent.width == 0 || extent.height == 0) return Status::Busy;
+	return !m_handle || m_window_extent != extent ? Status::Recreate : Status::Success;
 }
 
-Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
-	scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler, bool repeat) {
+	if (m_retire_tick != 0 && scheduler.IsFree(m_retire_tick)) {
+		ReleaseRetired();
+		m_first_present.reset();
+	}
+	const auto tick = m_image_acquired_ticks[m_frame_index];
+	if (repeat && !scheduler.IsFree(tick)) return Status::Busy;
+	scheduler.Wait(tick);
+	if (!m_present_fences.empty()) {
+		const auto fence = m_present_fences[m_frame_index];
+		const auto result = m_window.graphic_ctx.device.waitForFences(1, &fence, VK_TRUE, repeat ? 0 : UINT64_MAX);
+		if (result == vk::Result::eTimeout) return Status::Busy;
+		RequireVulkanSuccess(result, "wait for presentation slot");
+	}
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
-	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
+	    m_handle, repeat ? 0 : UINT64_MAX, m_image_acquired[m_frame_index], nullptr,
 	    &m_image_index);
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
-			LOGF("vkAcquireNextImageKHR returned vk::Result::eSuboptimalKHR\n");
-			return Status::Recreate;
+			m_suboptimal = true;
+			break;
+		case vk::Result::eTimeout:
+		case vk::Result::eNotReady: return Status::Busy;
 		case vk::Result::eErrorOutOfDateKHR:
 			LOGF("vkAcquireNextImageKHR returned vk::Result::eErrorOutOfDateKHR\n");
 			return Status::Recreate;
@@ -1365,7 +1445,8 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 	                           nullptr, 0, nullptr, 1, &to_transfer);
 
 	if (source == nullptr || game_rect.extent != m_extent) {
-		const vk::ClearColorValue black {};
+		vk::ClearColorValue black {};
+		if (source == nullptr && overlay.frame == nullptr) black.float32[3] = 1.0f;
 		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,
 		                           &black, 1, &to_transfer.subresourceRange);
 		if (blit_source) {
@@ -1478,6 +1559,7 @@ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
 	submit.AddSignal(m_render_complete[m_image_index]);
 	const auto tick                       = scheduler.Submit(submit);
 	m_image_acquired_ticks[m_frame_index] = tick;
+	if (m_first_present == m_image_index && m_retire_tick == 0) m_retire_tick = tick;
 	return tick;
 }
 
@@ -1528,6 +1610,14 @@ Swapchain::Status Swapchain::Present(bool repeat) {
 	present.pWaitSemaphores    = &ready;
 	present.waitSemaphoreCount = 1;
 
+	vk::SwapchainPresentFenceInfoKHR fence_info {};
+	if (!m_present_fences.empty()) {
+		const auto& fence = m_present_fences[m_frame_index];
+		RequireVulkanSuccess(m_window.graphic_ctx.device.resetFences(1, &fence), "reset presentation fence");
+		fence_info.swapchainCount = 1;
+		fence_info.pFences = &fence;
+		present.pNext = &fence_info;
+	}
 	vk::Result result;
 	{
 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
@@ -1536,8 +1626,8 @@ Swapchain::Status Swapchain::Present(bool repeat) {
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
-			LOGF("vkQueuePresentKHR returned vk::Result::eSuboptimalKHR\n");
-			return Status::Recreate;
+			m_suboptimal = true;
+			break;
 		case vk::Result::eErrorOutOfDateKHR:
 			LOGF("vkQueuePresentKHR returned vk::Result::eErrorOutOfDateKHR\n");
 			return Status::Recreate;
@@ -1549,6 +1639,7 @@ Swapchain::Status Swapchain::Present(bool repeat) {
 	if (!repeat) {
 		NotePresentGap();
 	}
+	if (!m_retired.empty() && !m_first_present) m_first_present = m_image_index;
 	m_frame_index = (m_frame_index + 1u) % static_cast<uint32_t>(m_images.size());
 	return Status::Success;
 }
@@ -1559,7 +1650,7 @@ Presenter::~Presenter() = default;
 
 #if defined(ANYPS5_KYTY)
 void Presenter::AttachSurface() {
-	Common::LockGuard lock(m_impl->present_mutex);
+	std::lock_guard lock(m_impl->present_mutex);
 	EXIT_IF(m_impl->window.surface == nullptr || m_impl->swapchain.ImageCount() != 0);
 	m_impl->swapchain.Create();
 	m_impl->frames.Initialize(m_impl->swapchain.ImageCount(), m_impl->swapchain.Format());
@@ -1609,7 +1700,7 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 		EXIT_IF(producer->IsInvalid());
 		frame->Clear(*producer, clear);
 	} else {
-		Common::LockGuard lock(m_impl->present_mutex);
+		std::lock_guard lock(m_impl->present_mutex);
 		auto& command = m_impl->present_scheduler.BeginCommand();
 		frame->Clear(command, clear);
 		frame->present_tick = m_impl->present_scheduler.Submit();
@@ -1618,7 +1709,7 @@ Presenter::Frame& Presenter::PrepareBlankFrame(uint32_t width, uint32_t height, 
 }
 
 bool Presenter::PresentLastFrame() {
-	Common::LockGuard lock(m_impl->present_mutex);
+	std::lock_guard lock(m_impl->present_mutex);
 	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
 		return false;
 	}
@@ -1626,29 +1717,9 @@ bool Presenter::PresentLastFrame() {
 	return true;
 }
 
-bool Presenter::PresentRepeat(uint32_t width, uint32_t height) {
-	Common::LockGuard lock(m_impl->present_mutex);
-	if (m_impl->swapchain.ImageCount() == 0) {
-		return false;
-	}
-	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
-		if (width == 0 || height == 0) {
-			return false;
-		}
-		const auto format = m_impl->frames.GetFormat();
-		auto*      frame  = m_impl->frames.Acquire({width, height}, format);
-		frame->source_flags = 0;
-		frame->blank        = true;
-		frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
-		vk::ClearColorValue clear {};
-		clear.float32[3] = 1.0f;
-		auto& command    = m_impl->present_scheduler.BeginCommand();
-		frame->Clear(command, clear);
-		frame->present_tick = m_impl->present_scheduler.Submit();
-		m_impl->layers[0]   = {frame, 0, false};
-	}
-	m_impl->Present(true);
-	return true;
+bool Presenter::PresentRepeat(bool (*flip_ready)(void*), void* context) {
+	std::unique_lock lock(m_impl->present_mutex, std::try_to_lock);
+	return lock.owns_lock() && !flip_ready(context) && m_impl->Present(flip_ready, context);
 }
 
 bool Presenter::IsHdrSupported() const noexcept {
@@ -1670,8 +1741,8 @@ void Presenter::Present(Frame& frame) {
 	Present(std::span(&layer, 1));
 }
 
-void Presenter::Present(std::span<const Layer> layers) {
-	Common::LockGuard lock(m_impl->present_mutex);
+bool Presenter::Present(std::span<const Layer> layers) {
+	std::lock_guard lock(m_impl->present_mutex);
 	for (const auto& layer: layers) {
 		EXIT_IF(layer.bus < 0 || layer.bus >= static_cast<int>(m_impl->layers.size()));
 		auto& previous = m_impl->layers[layer.bus];
@@ -1680,14 +1751,14 @@ void Presenter::Present(std::span<const Layer> layers) {
 		}
 		previous = layer;
 	}
-	m_impl->Present();
+	return m_impl->Present();
 }
 
 void Presenter::ClearLayer(int bus) {
 	if (static_cast<size_t>(bus) >= m_impl->layers.size()) {
 		return;
 	}
-	Common::LockGuard lock(m_impl->present_mutex);
+	std::lock_guard lock(m_impl->present_mutex);
 	auto& layer = m_impl->layers[bus];
 	if (layer.frame != nullptr) {
 		m_impl->frames.Release(layer.frame);
@@ -1695,7 +1766,8 @@ void Presenter::ClearLayer(int bus) {
 	}
 }
 
-void Presenter::Impl::Present(bool repeat) {
+bool Presenter::Impl::Present(bool (*flip_ready)(void*), void* context) {
+	const bool repeat = flip_ready != nullptr;
 	KYTY_PROFILER_FUNCTION();
 	using Common::DebugCounters::Counter;
 	using Common::DebugCounters::ScopedTimer;
@@ -1705,26 +1777,34 @@ void Presenter::Impl::Present(bool repeat) {
 	const auto* main_frame = layers[0].frame;
 	const bool hdr_changed = main_frame != nullptr && !main_frame->blank &&
 	                         swapchain.SetHdr((main_frame->source_flags & 4u) != 0);
-	if (hdr_changed || swapchain.NeedsResize()) {
-		RecoverSwapchain(Swapchain::Status::Recreate);
+	const auto extent = swapchain.CheckExtent();
+	if (extent == Swapchain::Status::Busy) return false;
+	if (recovery == Swapchain::Status::Success && (hdr_changed || extent == Swapchain::Status::Recreate || swapchain.Suboptimal())) {
+		recovery = Swapchain::Status::Recreate;
 	}
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
-		if (swapchain.ImageCount() == 0) {
-			return;
+		if (recovery != Swapchain::Status::Success && !RecoverSwapchain(repeat)) return false;
+		if (swapchain.ImageCount() == 0 || (repeat && flip_ready(context))) {
+			return false;
 		}
 		auto status = [&] {
 			ScopedTimer acquire_time(Counter::PresentAcquireNs);
-			return swapchain.AcquireNextImage(present_scheduler);
+			return swapchain.AcquireNextImage(present_scheduler, repeat);
 		}();
 		if (status != Swapchain::Status::Success) {
-			RecoverSwapchain(status);
+			if (status == Swapchain::Status::Busy) return false;
+			recovery = status;
+			if (repeat) return false;
 			continue;
 		}
 		auto&      command = present_scheduler.BeginCommand();
 		const bool draw_system_overlay = [&] {
 			ScopedTimer overlay_time(Counter::OverlayNs);
-			return (overlay_visual.active || PerformanceOverlayEnabled() ||
-			        ManifestProgressVisible()) &&
+			return (overlay_visual.active || PerformanceOverlayEnabled()
+#if !defined(ANYPS5_KYTY)
+			        || ManifestProgressVisible()
+#endif
+			        ) &&
 			       swapchain.PrepareSystemOverlay();
 		}();
 		swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
@@ -1737,7 +1817,8 @@ void Presenter::Impl::Present(bool repeat) {
 		}
 		status = swapchain.Present(repeat);
 		if (status != Swapchain::Status::Success) {
-			RecoverSwapchain(status);
+			recovery = status;
+			if (repeat) return false;
 			continue;
 		}
 
@@ -1745,10 +1826,11 @@ void Presenter::Impl::Present(bool repeat) {
 		if (!repeat) {
 			window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
 		}
-		return;
+		return true;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DroppedPresents);
+	return false;
 }
 
 void Presenter::Discard(Frame& frame) {
