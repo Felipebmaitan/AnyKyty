@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "graphics-precache"))
 import bundle
+import pass_coverage
 
 
 def words(*values):
@@ -38,6 +39,7 @@ def fixture(pixel_slot=1):
     shaders = words(1) + shader(2, 0x100) + words(1) + shader(1, 0x200) + words(0, 0, 0, 0)
     arrays = words(1, 0, 1, 0, 0, 0, 0, 0)
     raster = bytearray(16)
+    raster[0] = 3
     raster[1] = 2
     depth = bytearray(24)
     depth[0] = 1
@@ -98,6 +100,30 @@ class ShaderBundleTest(unittest.TestCase):
             member = fixture()
             data[offset:offset + len(member)] = member
         self.assertEqual([group["offset"] for group in self.read(data)], [4096, 8192])
+
+    def test_compares_selected_states_without_guessing_missing_ones(self):
+        manifests = self.root / "states.kpm"
+        manifests.write_text("M a vs code=0000000000000100\nM b ps code=0000000000000200\n"
+                             "M c ps code=0000000000000300\n"
+                             "P v=a p=b c0=R8G8B8A8Unorm m0=f noclip\n"
+                             "P v=a p=b c0=R8G8B8A8Unorm m0=3 poly=Line a2c b0=1.4.0.5\n"
+                             "P v=a p=c c0=R8G8B8A8Unorm m0=f noclip\n")
+        groups = self.read(fixture())
+        states = pass_coverage.index_pass_states(groups)
+        report = pass_coverage.compare_manifest_states(manifests, states)
+        self.assertEqual(report["with_pair_candidates"], 2)
+        self.assertEqual(report["with_explicit_selection"], dict(rasterizer=2, depth_stencil=2, blend=2))
+        for name, counts in report["fields"].items():
+            with self.subTest(name=name):
+                self.assertEqual(counts, dict(agree=1, differ=1, unobserved=1))
+
+        choices, = states.values()
+        choices.append({})
+        self.assertEqual(report, pass_coverage.compare_manifest_states(manifests, states))
+        choices.append({"rasterizer": dict(fill_mode=2, depth_clip_enable=1)})
+        mixed = pass_coverage.compare_manifest_states(manifests, states)["fields"]
+        self.assertEqual(mixed["polygon_mode"], dict(mixed=2, unobserved=1))
+        self.assertEqual(mixed["depth_clip"], dict(mixed=2, unobserved=1))
 
     def test_rejects_bad_shader_slot_and_truncated_table(self):
         with self.assertRaisesRegex(ValueError, "missing shader variant"):

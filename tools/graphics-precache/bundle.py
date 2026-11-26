@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from catalog import xxhash
+from pass_coverage import compare_manifest_states, index_pass_states
 from session import fields, read_manifest
 
 
@@ -221,7 +222,10 @@ def main(argv=None):
     parser.add_argument("asset", type=Path, help="loose bundle or archive with aligned loose bundle data")
     parser.add_argument("--output", type=Path, help="write detailed private inventory JSON to a new file")
     parser.add_argument("--reference", action="append", default=[], type=Path, help="Kyty .kpm for shader pair comparison")
+    parser.add_argument("--state-coverage", action="store_true", help="compare explicit raster and blend selections with references")
     args = parser.parse_args(argv)
+    if args.state_coverage and not args.reference:
+        parser.error("--state-coverage requires at least one --reference")
     try:
         bundles = list(read_bundles(args.asset, xxhash()))
         if not bundles:
@@ -229,6 +233,10 @@ def main(argv=None):
         summary, stage_pairs = summarize(bundles)
         if args.reference:
             summary["references"] = [compare_manifest(path, stage_pairs) for path in args.reference]
+        if args.state_coverage:
+            pass_states = index_pass_states(bundles)
+            for result, path in zip(summary["references"], args.reference):
+                result["state_coverage"] = compare_manifest_states(path, pass_states)
         if args.output:
             with args.output.open("x", encoding="utf-8") as output:
                 json.dump(dict(summary=summary, bundles=bundles), output, separators=(",", ":"))
