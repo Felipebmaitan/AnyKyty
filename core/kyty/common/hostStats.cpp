@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 #include <windows.h>
@@ -377,6 +378,61 @@ std::optional<uint64_t> Find(const ProcValues& values, const char* key) {
 	return it != values.end() ? std::optional(it->second) : std::nullopt;
 }
 
+struct MemoryControlGroup {
+	std::filesystem::path directory;
+	bool unified;
+};
+
+std::vector<MemoryControlGroup> MemoryControlGroups() {
+	std::vector<MemoryControlGroup> groups;
+	std::ifstream membership("/proc/self/cgroup");
+	std::string line;
+	while (std::getline(membership, line)) {
+		const auto first = line.find(':');
+		if (first == std::string::npos) continue;
+		const auto second = line.find(':', first + 1);
+		if (second == std::string::npos) continue;
+		const bool unified = second == first + 1;
+		const auto controllers = "," + line.substr(first + 1, second - first - 1) + ",";
+		if (!unified && controllers.find(",memory,") == std::string::npos) continue;
+		const std::filesystem::path root = unified ? "/sys/fs/cgroup" : "/sys/fs/cgroup/memory";
+		const auto member = std::filesystem::path(line.substr(second + 1)).relative_path();
+		auto directory = (root / member).lexically_normal();
+		const auto limit = unified ? "memory.max" : "memory.limit_in_bytes";
+		std::error_code error;
+		if (!std::filesystem::is_regular_file(directory / limit, error)) directory = root;
+		for (; !directory.empty(); directory = directory.parent_path()) {
+			groups.push_back({directory, unified});
+			if (directory == root || directory == directory.root_path()) break;
+		}
+	}
+	return groups;
+}
+
+SystemMemory LimitToMemoryControlGroup(SystemMemory memory) {
+	static const auto groups = MemoryControlGroups();
+	for (const auto& group: groups) {
+		std::ifstream limit_file(group.directory / (group.unified ? "memory.max" : "memory.limit_in_bytes"));
+		std::ifstream usage_file(group.directory / (group.unified ? "memory.current" : "memory.usage_in_bytes"));
+		uint64_t limit = 0;
+		uint64_t usage = 0;
+		if (!(limit_file >> limit) || !(usage_file >> usage)) continue;
+
+		std::ifstream stats(group.directory / "memory.stat");
+		const std::string_view field = group.unified ? "inactive_file" : "total_inactive_file";
+		std::string key;
+		uint64_t bytes = 0;
+		while (stats >> key >> bytes) {
+			if (key != field) continue;
+			usage -= std::min(usage, bytes);
+			break;
+		}
+		memory.total = std::min(memory.total, limit);
+		memory.available = std::min(memory.available, limit - std::min(limit, usage));
+	}
+	return memory;
+}
+
 struct PlatformState {};
 
 void SampleThreads(HostStats& stats, Counters& now) {
@@ -507,7 +563,9 @@ std::optional<SystemMemory> ReadSystemMemory() {
 	const auto memory = ReadProcValues("/proc/meminfo");
 	const auto total = Find(memory, "MemTotal");
 	const auto available = Find(memory, "MemAvailable");
-	if (total && available && *available <= *total) return SystemMemory {*total, *available};
+	if (total && available && *available <= *total) {
+		return LimitToMemoryControlGroup({*total, *available});
+	}
 #endif
 	return std::nullopt;
 }
