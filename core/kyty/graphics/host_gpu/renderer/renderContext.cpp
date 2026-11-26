@@ -408,21 +408,11 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 
 void RenderContext::CacheDmaBases(const ShaderStageRuntime& runtime) {
 	const auto&      program   = runtime.module->info;
-	const auto&      user_data = runtime.resources->user_data;
+	const auto&      resources = *runtime.resources;
 	std::shared_lock lock(m_mapped_ranges_mutex);
 
-	const auto cache_after = [&](const std::array<uint32_t, 2>& pair, uint64_t window,
-	                             bool contiguous) {
-		const auto [low_reg, high_reg] = pair;
-		const auto low  = static_cast<uint64_t>(low_reg) - program.user_data_base;
-		const auto high = static_cast<uint64_t>(high_reg) - program.user_data_base;
-		if (low_reg < program.user_data_base || high_reg < program.user_data_base ||
-		    low >= user_data.size() || high >= user_data.size()) {
-			return;
-		}
-		const auto base =
-		    user_data[low] | (static_cast<uint64_t>(user_data[high] & 0xffffu) << 32u);
-		if (base > UINT64_MAX - window) {
+	const auto cache_range = [&](uint64_t base, uint64_t window, bool contiguous) {
+		if (base == 0 || base > UINT64_MAX - window) {
 			return;
 		}
 		m_mapped_ranges.ForEachInRange(base, window, [&](uint64_t start, uint64_t end) {
@@ -431,11 +421,31 @@ void RenderContext::CacheDmaBases(const ShaderStageRuntime& runtime) {
 			}
 		});
 	};
+	const auto cache_after = [&](const std::array<uint32_t, 2>& pair, uint64_t window,
+	                             bool contiguous) {
+		const auto [low_reg, high_reg] = pair;
+		const auto low  = static_cast<uint64_t>(low_reg) - program.user_data_base;
+		const auto high = static_cast<uint64_t>(high_reg) - program.user_data_base;
+		if (low_reg < program.user_data_base || high_reg < program.user_data_base ||
+		    low >= resources.user_data.size() || high >= resources.user_data.size()) {
+			return;
+		}
+		const auto base = resources.user_data[low] |
+		                  (static_cast<uint64_t>(resources.user_data[high] & 0xffffu) << 32u);
+		cache_range(base, window, contiguous);
+	};
 	for (const auto& pair: program.info.dma_base_registers) {
 		cache_after(pair, BufferCache::CACHING_PAGESIZE, false);
 	}
 	for (const auto& pair: program.info.vsharp_base_registers) {
 		cache_after(pair, VsharpBaseReach, true);
+	}
+	const auto& flat = resources.flattened_srt;
+	for (const auto& [low, high]: program.info.address_bases) {
+		if (low < flat.size() && high < flat.size()) {
+			const auto base = flat[low] | (uint64_t {flat[high]} << 32u);
+			cache_range(base, BufferCache::CACHING_PAGESIZE, false);
+		}
 	}
 	CacheTlasMemory(runtime);
 }
