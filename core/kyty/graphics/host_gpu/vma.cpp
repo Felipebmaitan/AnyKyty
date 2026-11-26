@@ -169,7 +169,7 @@ static uint64_t MemoryBudgetCap() {
 }
 
 static std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> HeapSizeLimits(const GraphicContext& graphics) {
-	constexpr uint64_t DesktopReserve = 2048ull << 20u;
+	constexpr uint64_t DesktopReserve = 3072ull << 20u;
 	constexpr uint64_t LargeHeap      = 4ull << 30u;
 	std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> limits {};
 	limits.fill(VK_WHOLE_SIZE);
