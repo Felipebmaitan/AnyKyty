@@ -2356,7 +2356,6 @@ struct PipelineCache::ChainJob {
 	std::array<ShaderParams, 3>          vertex_params;
 	std::array<ShaderVertexInputInfo, 3> vertex_info;
 	uint32_t                             vertex_count     = 1;
-	uint32_t                             push_data_cursor = 0;
 	PipelineStaticParameters             params;
 };
 #endif
@@ -2764,19 +2763,19 @@ bool PipelineCache::ResolveGraphicsPrograms(const HW::Context&    context,
 		                     Prospero::IsRectList(user_config.GetPrimType()));
 		last_stage.user_clip_planes = clip_control.user_clip_planes;
 	}
-	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
-	    mesh_active, object_primitive_id, last_stage.user_clip_planes);
+	using ShaderRecompiler::IR::PushData;
 	const ProgramLockMaybe lock(m_program_lock, ahead == nullptr || !t_ahead_unlocked);
 	if (ahead != nullptr) {
 #if defined(ANYPS5_KYTY)
-		const uint32_t first_cursor = push_data_cursor;
 		t_ahead_missing             = false;
 #endif
 		const ShaderModule* pixel_module = nullptr;
 		if (pixel_active) {
+			auto push_data_cursor = PushData::GraphicsStageCursor(ShaderType::Pixel);
 			pixel_module = GetAhead(pixel_params, pixel_info, push_data_cursor, *ahead);
 		}
 		for (uint32_t i = 0; i < (tess_active ? 3u : 1u) && !ahead->reads.Failed(); i++) {
+			auto push_data_cursor = PushData::GraphicsStageCursor(vertex_info[i].logical_stage);
 			GetAhead(vertex_params[i], vertex_info[i], push_data_cursor, *ahead);
 		}
 		if (ahead->reads.Failed()) {
@@ -2790,7 +2789,6 @@ bool PipelineCache::ResolveGraphicsPrograms(const HW::Context&    context,
 					job->vertex_params[i] = vertex_params[i];
 					job->vertex_info[i]   = vertex_info[i];
 				}
-				job->push_data_cursor = first_cursor;
 				job->params           = LibraryStaticParameters(context, user_config, tess_active,
 				                                                vertex_info[0].tess, true,
 				                                                pixel_info.ps_sample_shading);
@@ -2811,6 +2809,7 @@ bool PipelineCache::ResolveGraphicsPrograms(const HW::Context&    context,
 		return true;
 	}
 	if (pixel_active) {
+		auto push_data_cursor = PushData::GraphicsStageCursor(ShaderType::Pixel);
 		const auto* pixel_module = GetProgram(pixel_params, pixel_info, push_data_cursor);
 		if (pixel_module == nullptr) {
 			vertex_info[0].stage = {};
@@ -2825,6 +2824,7 @@ bool PipelineCache::ResolveGraphicsPrograms(const HW::Context&    context,
 		state.mrt_mask &= color_output_mask;
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
+		auto push_data_cursor = PushData::GraphicsStageCursor(vertex_info[i].logical_stage);
 		GetProgram(vertex_params[i], vertex_info[i], push_data_cursor);
 	}
 	return true;
@@ -3236,7 +3236,7 @@ void PipelineCache::StopWorkers() {
 void PipelineCache::QueueChain(std::unique_ptr<ChainJob>&& job) {
 	thread_local std::vector<uint32_t>       words;
 	thread_local std::array<uint64_t, 4096> seen {};
-	uint64_t hash = XXH3_64bits_withSeed(&job->params, sizeof(job->params), job->push_data_cursor);
+	uint64_t hash = XXH3_64bits(&job->params, sizeof(job->params));
 	BuildStageStaticKey(job->pixel_info, words);
 	hash = XXH3_64bits_withSeed(words.data(), words.size() * sizeof(uint32_t), hash ^ job->pixel_params.hash);
 	for (uint32_t i = 0; i < job->vertex_count; i++) {
@@ -3419,16 +3419,18 @@ const ShaderModule* PipelineCache::ChainModule(const ShaderParams& params, Input
 }
 
 void PipelineCache::RunChain(ChainJob& job) {
-	uint32_t                               cursor = job.push_data_cursor;
+	using ShaderRecompiler::IR::PushData;
+	auto pixel_cursor = PushData::GraphicsStageCursor(ShaderType::Pixel);
 	ShaderRecompiler::IR::ResourceSnapshot pixel_resources;
 	ShaderRecompiler::IR::ResourceSnapshot vertex_resources;
 	std::array<const ShaderModule*, 4>     stages {};
-	const auto* pixel = ChainModule(job.pixel_params, job.pixel_info, cursor, pixel_resources);
+	const auto* pixel = ChainModule(job.pixel_params, job.pixel_info, pixel_cursor, pixel_resources);
 	if (pixel == nullptr) {
 		m_chain_failed.fetch_add(1, std::memory_order_relaxed);
 		return;
 	}
 	for (uint32_t i = 0; i < job.vertex_count; i++) {
+		auto cursor = PushData::GraphicsStageCursor(job.vertex_info[i].logical_stage);
 		stages[i] = ChainModule(job.vertex_params[i], job.vertex_info[i], cursor, vertex_resources);
 		if (stages[i] == nullptr) {
 			m_chain_failed.fetch_add(1, std::memory_order_relaxed);

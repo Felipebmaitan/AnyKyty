@@ -408,12 +408,13 @@ void DefineDescriptors(EmitterState& state) {
 		bindings.stride_count = counts[static_cast<size_t>(Kind::Buffers)];
 	}
 	bindings.table_block_dwords = table ? 2u : 0u;
+	bindings.clip_plane_dwords = 4u * std::bit_width(state.user_clip_planes);
 	bindings.push_data_start_dword =
 	    IR::PushData::StartFor(bindings.push_data_start_dword, bindings.ShaderDataDwords());
 	counts[static_cast<size_t>(Kind::ShaderData)] =
 	    bindings.ShaderDataDwords() != 0 && !bindings.UsesPushData();
 	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||
-	    state.object_primitive_id_variable != 0 || state.user_clip_planes != 0) {
+	    state.object_primitive_id_variable != 0) {
 		const auto type              = PushConstantBlockType(state);
 		state.push_constant_variable = state.builder.DefineGlobalVariable(
 		    TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);

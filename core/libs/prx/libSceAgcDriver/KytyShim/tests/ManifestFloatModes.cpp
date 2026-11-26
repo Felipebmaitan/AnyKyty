@@ -90,6 +90,21 @@ void OlderManifest() {
 	}
 }
 
+void OlderGraphicsCursors() {
+	const auto canonical = Text(SaveManifest(DrawManifest()));
+	auto older = Replace(canonical, " cur=33", " cur=11");
+	older = Replace(older, " cur=19", "");
+	Check(older != canonical, "the older draw uses different graphics cursors");
+	PipelineManifest loaded;
+	uint32_t skipped = 0;
+	Check(LoadManifest(Bytes(older), loaded, &skipped) && skipped == 0, "the older draw loads");
+	for (const auto& module: loaded.modules) {
+		Check(module.push_data_cursor == ShaderRecompiler::IR::PushData::GraphicsStageCursor(module.stage),
+		      "an older cursor selects the current stage window");
+	}
+	Check(Text(SaveManifest(loaded)) == canonical, "the older pipeline keeps its canonical stage references");
+}
+
 void BadFloatModes() {
 	const auto text = Text(SaveManifest(DrawManifest()));
 	for (const auto& [from, to]: {std::pair {" fp=f0.1.0", " fp=f0.1.0 fh=c0.0.0"},
@@ -144,6 +159,7 @@ void StageRegisters() {
 int main() {
 	RoundTrip();
 	OlderManifest();
+	OlderGraphicsCursors();
 	BadFloatModes();
 	LargeImageSpecialization();
 	StageRegisters();

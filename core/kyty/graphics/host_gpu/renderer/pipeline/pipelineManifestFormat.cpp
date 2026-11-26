@@ -796,7 +796,9 @@ bool ReadModule(std::span<const std::string_view> tokens, ManifestModule& module
 	r.ok            = code && ParseNumber(*code, module.code_hash, 16) && module.code_hash != 0;
 	if (const auto back = r.Find("back")) r.ok = r.ok && ParseNumber(*back, module.back_hash, 16);
 	r.Dec("ud", module.user_data_count, 0u);
-	r.Dec("cur", module.push_data_cursor, 0u);
+	uint32_t cursor = 0;
+	r.Dec("cur", cursor, 0u);
+	if (stage == ShaderType::Compute) module.push_data_cursor = cursor;
 	if (auto* vertex = std::get_if<ShaderVertexInputInfo>(&module.input)) {
 		VisitVertexInput(r, *vertex, *vertex);
 	} else if (auto* pixel = std::get_if<ShaderPixelInputInfo>(&module.input)) {
@@ -1175,6 +1177,9 @@ uint64_t ManifestModule::ProgramHash() const {
 }
 
 void NormalizeManifestInput(ManifestModule& module) {
+	if (module.stage != ShaderType::Compute) {
+		module.push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsStageCursor(module.stage);
+	}
 	if (auto* vertex = std::get_if<ShaderVertexInputInfo>(&module.input)) {
 		for (int i = 0; i < vertex->resources_num; i++) {
 			vertex->resources[i].UpdateAddress48(0);

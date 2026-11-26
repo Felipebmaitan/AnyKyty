@@ -2828,7 +2828,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared, uint64_t invocati
 	prepared.uniform_buffers.resize(
 	    layout.descriptor_counts[static_cast<size_t>(BindingKind::UniformBuffers)]);
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
-	          prepared.shader_data.end(), 0);
+	          prepared.shader_data.begin() + layout.ClipPlaneDword(), 0);
 	auto pack_memory_offset = [&](uint32_t index, uint32_t offset) {
 		const auto dword = layout.memory_offset_dword + index / 4u;
 		const auto shift = (index % 4u) * 8u;

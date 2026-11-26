@@ -127,6 +127,33 @@ void RefusedPlanAbandonsTheStoreEntry() {
     Require(after == record, "a refusal changed the encoding of the next program");
 }
 
+void GraphicsStageDataRoundTrips() {
+    const auto vertex = PushData::GraphicsStageCursor(ShaderType::Vertex);
+    const auto pixel = PushData::GraphicsStageCursor(ShaderType::Pixel);
+    Require(PushData::GraphicsStageCursor(ShaderType::Mesh) == vertex &&
+            PushData::GraphicsStageCursor(ShaderType::Local) == vertex, "pre-raster stage window changed");
+    for (uint32_t size = 1; size <= PushData::DwordCount; ++size) {
+        const auto v = PushData::StartFor(vertex, size);
+        const auto p = PushData::StartFor(pixel, size);
+        Require(v == PushData::NoStart || (v >= PushData::MeshDrawDwordCount && v + size <= pixel),
+                "vertex data overlaps draw or pixel data");
+        Require(p == PushData::NoStart || (p == pixel && p + size <= PushData::DwordCount),
+                "pixel data exceeds push constants");
+    }
+    Bindings layout;
+    layout.memory_offset_dword = 2;
+    layout.clip_plane_dwords = 12;
+    layout.push_data_start_dword = PushData::StartFor(vertex, layout.ShaderDataDwords());
+    Require(layout.ClipPlaneDword() == 2 && layout.push_data_start_dword == PushData::NoStart,
+            "clip planes did not spill with their stage");
+    Writer writer;
+    Io(writer, layout);
+    Reader reader {.bytes = writer.bytes};
+    Bindings restored;
+    Io(reader, restored);
+    Require(reader.ok && reader.bytes.empty() && restored == layout, "stored clip-plane layout changed");
+}
+
 void StoredComputeModuleSelection() {
     using namespace ShaderStoreFormat;
 
@@ -183,6 +210,7 @@ int main() {
     ImpossibleValueOutsideInstructionsRefusesThePlan();
     InstructionOutsideThePlanRefusesThePlan();
     RefusedPlanAbandonsTheStoreEntry();
+    GraphicsStageDataRoundTrips();
     StoredComputeModuleSelection();
     std::puts("kyty_shim_shader_store_encode: ok");
     return 0;

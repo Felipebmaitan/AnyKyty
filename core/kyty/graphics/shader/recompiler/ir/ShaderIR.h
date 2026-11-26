@@ -454,13 +454,20 @@ struct PushData {
 	static constexpr uint32_t NoStart    = UINT32_MAX;
 	std::array<uint32_t, DwordCount> dwords {};
 
-	static constexpr uint32_t UserClipPlaneDword = MeshDrawDwordCount;
+	static constexpr uint32_t VertexWindow = DwordCount + 1;
+	static constexpr uint32_t PixelStart = MeshDrawDwordCount + (DwordCount - MeshDrawDwordCount) / 2;
 
-	[[nodiscard]] static constexpr uint32_t GraphicsDrawDwords(bool mesh, bool object_id,
-	                                                           uint32_t user_clip_planes = 0) {
-		if (user_clip_planes != 0) {
-			return UserClipPlaneDword + 4u * std::bit_width(user_clip_planes);
+	[[nodiscard]] static constexpr uint32_t GraphicsStageCursor(ShaderType stage) {
+		switch (stage) {
+			case ShaderType::Vertex:
+			case ShaderType::Mesh:
+			case ShaderType::Local: return VertexWindow;
+			case ShaderType::Pixel: return PixelStart;
+			default: return NoStart;
 		}
+	}
+
+	[[nodiscard]] static constexpr uint32_t GraphicsDrawDwords(bool mesh, bool object_id) {
 		return mesh ? MeshDrawDwordCount : static_cast<uint32_t>(object_id);
 	}
 
@@ -468,6 +475,9 @@ struct PushData {
 		return size != 0 && start <= DwordCount && size <= DwordCount - start;
 	}
 	[[nodiscard]] static constexpr uint32_t StartFor(uint32_t cursor, uint32_t size) {
+		if (cursor == VertexWindow) {
+			return size != 0 && size <= PixelStart - MeshDrawDwordCount ? MeshDrawDwordCount : NoStart;
+		}
 		return CanFit(cursor, size) ? cursor : NoStart;
 	}
 };
@@ -609,6 +619,7 @@ struct Bindings {
 	uint32_t ray_query_dword       = PushData::NoStart;
 	uint32_t memory_offset_dword = 0;
 	uint32_t table_block_dwords  = 0;
+	uint32_t clip_plane_dwords   = 0;
 	uint32_t mip_stats_count = 0;
 	uint32_t stride_count = 0;
 	bool     flattened_srt_uniform = false;
@@ -624,7 +635,8 @@ struct Bindings {
 	}
 	[[nodiscard]] uint32_t StrideDword() const { return MipStatsDword() + mip_stats_count; }
 	[[nodiscard]] uint32_t TableBlockDword() const { return StrideDword() + stride_count; }
-	[[nodiscard]] uint32_t ShaderDataDwords() const { return TableBlockDword() + table_block_dwords; }
+	[[nodiscard]] uint32_t ClipPlaneDword() const { return TableBlockDword() + table_block_dwords; }
+	[[nodiscard]] uint32_t ShaderDataDwords() const { return ClipPlaneDword() + clip_plane_dwords; }
 	[[nodiscard]] bool UsesPushData() const {
 		return push_data_start_dword != PushData::NoStart;
 	}
