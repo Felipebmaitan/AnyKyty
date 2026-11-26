@@ -544,6 +544,7 @@ private:
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::deque<ShaderModule>                     modules;
 		bool                                         skip_dispatch = false;
+		bool                                         serve_runtime_samplers = false;
 		std::array<size_t, 2>                        last_module {SIZE_MAX, SIZE_MAX};
 #if defined(ANYPS5_KYTY)
 		struct FailedVariant {
@@ -615,6 +616,8 @@ private:
 	bool                                   m_lane_pairs KYTY_GUARDED_BY(m_program_lock)      = false;
 	bool                                   m_runtime_buffers KYTY_GUARDED_BY(m_program_lock) = false;
 	std::unordered_set<uint64_t>           m_runtime_buffer_logged KYTY_GUARDED_BY(m_program_lock);
+	bool                                   m_runtime_samplers KYTY_GUARDED_BY(m_program_lock) = false;
+	std::unordered_set<uint64_t>           m_runtime_sampler_logged KYTY_GUARDED_BY(m_program_lock);
 	bool                                   m_queue_only KYTY_GUARDED_BY(m_program_lock)      = false;
 	bool                                   m_queued KYTY_GUARDED_BY(m_program_lock)          = false;
 	vk::PipelineCache             m_driver_cache = nullptr;
@@ -660,6 +663,9 @@ private:
 	template <typename InputInfo>
 	const ShaderModule* GetRuntimeBufferProgram(const ShaderParams& params, InputInfo& input_info,
 	                                            uint32_t& push_data_cursor) KYTY_REQUIRES(m_program_lock);
+	template <typename InputInfo>
+	const ShaderModule* GetRuntimeSamplerProgram(const ShaderParams& params, InputInfo& input_info,
+	                                             uint32_t& push_data_cursor) KYTY_REQUIRES(m_program_lock);
 	template <typename InputInfo>
 	const ShaderModule* GetAhead(const ShaderParams& params, InputInfo& input_info,
 	                             uint32_t& push_data_cursor, ProgramResolution& ahead)

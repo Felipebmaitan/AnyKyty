@@ -34,6 +34,7 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -568,6 +569,7 @@ std::vector<vk::Format> VertexInputFormats(const ShaderVertexInputInfo&         
 
 constexpr uint32_t LanePairsKey = 0x574c5052u;
 constexpr uint32_t RuntimeBuffersKey = 0x52425546u;
+constexpr uint32_t RuntimeSamplersKey = 0x53414d50u;
 
 void SkipCallExpansionFailure(uint64_t hash, const ShaderRecompiler::ShaderSource& source) {
 	Common::HackNotice::Report("dispatch whose call tables do not expand skipped",
@@ -1716,6 +1718,15 @@ const ShaderModule* PipelineCache::GetRuntimeBufferProgram(const ShaderParams& p
 }
 
 template <typename InputInfo>
+const ShaderModule* PipelineCache::GetRuntimeSamplerProgram(const ShaderParams& params, InputInfo& input_info,
+                                                            uint32_t& push_data_cursor) {
+	m_runtime_samplers = true;
+	const auto* module = GetProgram(params, input_info, push_data_cursor);
+	m_runtime_samplers = false;
+	return module;
+}
+
+template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               uint32_t& push_data_cursor) {
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
@@ -1760,6 +1771,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	if (runtime_buffers) {
 		m_lookup_key.static_state.push_back(RuntimeBuffersKey);
 	}
+	const bool runtime_samplers = m_runtime_samplers;
+	if (runtime_samplers) {
+		m_lookup_key.static_state.push_back(RuntimeSamplersKey);
+	}
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
@@ -1768,6 +1783,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	};
 	bool       failed       = false;
 	bool       retry_runtime_buffers = false;
+	bool       retry_runtime_samplers = false;
 	const auto skip_failure = [&](const ShaderRecompiler::IR::ResourcePlan& plan) KYTY_REQUIRES(m_program_lock)
 	    -> const ShaderModule* {
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
@@ -1783,6 +1799,15 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 				return nullptr;
 			}
 		}
+		if (!runtime_samplers && ShaderRecompiler::IR::IndirectSamplerMaterializationFailed()) {
+			retry_runtime_samplers = true;
+			if (m_runtime_sampler_logged.insert(params.hash).second) {
+				PipelineCacheLog("[kyty] shader 0x{:016x}: its sampler descriptors chosen in memory tables are read at "
+				                 "run time and served from a fixed set of samplers when its candidates cannot be bound",
+				                 params.hash);
+			}
+			return nullptr;
+		}
 		Common::HackNotice::Report("draw or dispatch with unresolvable resources skipped",
 		                           "PipelineCache::GetProgram", params.hash, 0);
 		return nullptr;
@@ -1790,7 +1815,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	bool source_changed = false;
 	if (entry != m_program_cache.end()) {
 		auto& cached = entry->second;
-		if (cached.skip_dispatch) return nullptr;
+		if (cached.skip_dispatch) {
+			return cached.serve_runtime_samplers ? GetRuntimeSamplerProgram(params, input_info, push_data_cursor)
+			                                     : nullptr;
+		}
 		ShaderModule* module = nullptr;
 #if defined(ANYPS5_KYTY)
 		bool specialized = false;
@@ -1844,7 +1872,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		}
 		if (failed) {
 			skip_failure(cached.resource_plan);
-			return retry_runtime_buffers ? GetRuntimeBufferProgram(params, input_info, push_data_cursor) : nullptr;
+			if (retry_runtime_buffers) return GetRuntimeBufferProgram(params, input_info, push_data_cursor);
+			return retry_runtime_samplers ? GetRuntimeSamplerProgram(params, input_info, push_data_cursor) : nullptr;
 		}
 #if defined(ANYPS5_KYTY)
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
@@ -1925,6 +1954,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	options.rt_emulation       = Config::RayTracingEmulation();
 	options.wave_lane_pairs    = m_lane_pairs;
 	options.runtime_buffer_descriptors = runtime_buffers;
+	options.runtime_sampler_descriptors = runtime_samplers;
 	ShaderRecompiler::ShaderSource source;
 	if (entry == m_program_cache.end()) {
 		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
@@ -1994,11 +2024,20 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	                          "PipelineCache::GetProgram", params.hash, 0,
 	                          [&]() KYTY_NO_THREAD_SAFETY_ANALYSIS { built = build(); })) {
 		if (retry_runtime_buffers) return GetRuntimeBufferProgram(params, input_info, push_data_cursor);
+		if (retry_runtime_samplers) return GetRuntimeSamplerProgram(params, input_info, push_data_cursor);
 		return built;
+	}
+	const bool serve_runtime_samplers = ShaderRecompiler::IR::TakeRuntimeSamplerStop() && !runtime_samplers;
+	if (serve_runtime_samplers && m_runtime_sampler_logged.insert(params.hash).second) {
+		PipelineCacheLog("[kyty] shader 0x{:016x}: its sampler descriptors loaded at run time are served from a fixed "
+		                 "set of samplers",
+		                 params.hash);
 	}
 	if (const auto found = m_program_cache.find(m_lookup_key); found != m_program_cache.end()) {
 		if (found->second.modules.empty()) {
-			found->second.skip_dispatch = true;
+			found->second.skip_dispatch          = true;
+			found->second.serve_runtime_samplers = serve_runtime_samplers;
+			if (serve_runtime_samplers) return GetRuntimeSamplerProgram(params, input_info, push_data_cursor);
 		} else {
 			found->second.NoteFailed(push_data_cursor);
 			if (natural) {
@@ -2014,7 +2053,9 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			}
 		}
 	} else {
-		m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+		m_program_cache.emplace(m_lookup_key,
+		                        Program {.skip_dispatch = true, .serve_runtime_samplers = serve_runtime_samplers});
+		if (serve_runtime_samplers) return GetRuntimeSamplerProgram(params, input_info, push_data_cursor);
 	}
 	return nullptr;
 #endif
@@ -3079,8 +3120,11 @@ void PipelineCache::RunCompileJob(CompileJob& job, InputInfo& input_info) {
 		options.rt_oracle          = options.native_ray_tracing ? Config::RayTracingOracle() : 0u;
 		options.rt_emulation       = Config::RayTracingEmulation();
 		options.wave_lane_pairs    = job.lane_pairs;
+		const auto& static_state = job.key.static_state;
+		options.runtime_sampler_descriptors = !static_state.empty() && static_state.back() == RuntimeSamplersKey;
+		const size_t buffers_marker = options.runtime_sampler_descriptors ? 2u : 1u;
 		options.runtime_buffer_descriptors =
-		    !job.key.static_state.empty() && job.key.static_state.back() == RuntimeBuffersKey;
+		    static_state.size() >= buffers_marker && static_state[static_state.size() - buffers_marker] == RuntimeBuffersKey;
 		auto source = ShaderRecompiler::PrepareShaderSource(job.params.code, options);
 		if (!source.calls.empty() || source.unsupported_call_pc != UINT32_MAX) {
 			return;
@@ -3127,7 +3171,12 @@ void PipelineCache::RunCompileJob(CompileJob& job, InputInfo& input_info) {
 	}();
 #endif
 	const ShaderModule* ahead = nullptr;
+	const bool serve_runtime_samplers =
+	    !module && ShaderRecompiler::IR::TakeRuntimeSamplerStop() && !options.runtime_sampler_descriptors;
 	LockPrograms();
+	if (serve_runtime_samplers) {
+		m_program_cache.try_emplace(job.key, Program {.skip_dispatch = true, .serve_runtime_samplers = true});
+	}
 #if defined(ANYPS5_KYTY)
 	if (!compiled && job.speculative) {
 		m_speculative_failed.fetch_add(1, std::memory_order_relaxed);

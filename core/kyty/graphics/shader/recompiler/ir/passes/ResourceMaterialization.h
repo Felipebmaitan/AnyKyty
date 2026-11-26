@@ -78,6 +78,7 @@ void SetComputeIndirectFloors(size_t keys, size_t images);
 
 bool HasIndirectBuffers(const ResourcePlan& program);
 bool IndirectBufferMaterializationFailed();
+bool IndirectSamplerMaterializationFailed();
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 

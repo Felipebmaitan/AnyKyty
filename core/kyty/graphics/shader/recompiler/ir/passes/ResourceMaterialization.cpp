@@ -2485,9 +2485,62 @@ bool HasIndirectBuffers(const ResourcePlan& program) {
 	});
 }
 
+static DescriptorValue RuntimeSamplerCandidate(uint32_t key) {
+	constexpr std::array<uint32_t, SamplerResource::RuntimeAddressClasses> clamps {0u, 1u, 2u, 6u};
+	uint32_t address_x = 2u, address_y = 2u, filter = 0u, mip = 0u, compare = 0u;
+	bool     unnormalized = false;
+	if (key < SamplerResource::RuntimePlainKeys) {
+		mip       = key % SamplerResource::RuntimeMipClasses;
+		filter    = key / SamplerResource::RuntimeMipClasses % SamplerResource::RuntimeFilterClasses;
+		address_y = key / (SamplerResource::RuntimeMipClasses * SamplerResource::RuntimeFilterClasses) %
+		            SamplerResource::RuntimeAddressClasses;
+		address_x = key / (SamplerResource::RuntimeMipClasses * SamplerResource::RuntimeFilterClasses *
+		                   SamplerResource::RuntimeAddressClasses);
+	} else if (key < SamplerResource::RuntimePlainKeys + SamplerResource::RuntimeUnnormalizedKeys) {
+		unnormalized = true;
+		filter       = (key - SamplerResource::RuntimePlainKeys) != 0u ? 3u : 0u;
+	} else {
+		const auto index = key - SamplerResource::RuntimePlainKeys - SamplerResource::RuntimeUnnormalizedKeys;
+		address_x = address_y = index % SamplerResource::RuntimeAddressClasses;
+		filter    = (index / SamplerResource::RuntimeAddressClasses) % 2u != 0u ? 3u : 0u;
+		compare   = index / (SamplerResource::RuntimeAddressClasses * 2u);
+	}
+	const bool aniso      = filter == 4u;
+	const auto mag_filter = aniso ? 3u : filter >> 1u;
+	const auto min_filter = aniso ? 3u : filter & 1u;
+	DescriptorValue value {.dword_count = 4u};
+	value.dwords[0] = clamps[address_x] | (clamps[address_y] << 3u) | (clamps[address_y] << 6u) |
+	                  (aniso ? 4u << 9u : 0u) | (compare << 12u) | (unnormalized ? 1u << 15u : 0u);
+	value.dwords[1] = 0xfffu << 12u;
+	value.dwords[2] = (mag_filter << 20u) | (min_filter << 22u) | (mip << 26u);
+	value.dwords[3] = 0u;
+	return value;
+}
+
+static void MaterializeRuntimeSampler(uint32_t resource, ResourceSnapshot& snapshot,
+                               ResourceSpecialization& specialization) {
+	snapshot.samplers[resource] = RuntimeSamplerCandidate(3u * SamplerResource::RuntimeMipClasses + 2u);
+	auto& root = specialization.samplers[resource];
+	root.indirect_root              = resource;
+	root.indirect_mapping_offset    = 0u;
+	root.indirect_search_iterations = 0u;
+	auto child = root;
+	for (uint32_t key = 0; key < SamplerResource::RuntimeKeys; ++key) {
+		snapshot.samplers.push_back(RuntimeSamplerCandidate(key));
+		specialization.samplers.push_back(child);
+	}
+}
+
+thread_local bool t_indirect_sampler_failure = false;
+
+bool IndirectSamplerMaterializationFailed() {
+	return t_indirect_sampler_failure;
+}
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	t_indirect_buffer_failure = false;
+	t_indirect_sampler_failure = false;
 	t_record_blocks.clear();
 	for (auto& keys: PlanScratch(program).selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) {
@@ -2740,6 +2793,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		const auto base_index =
 		    i < program.info.samplers.size() ? i : specialization.samplers[i].indirect_root;
 		if (base_index >= program.info.samplers.size()) return false;
+		if (i < program.info.samplers.size() && program.info.samplers[i].runtime_descriptor) {
+			MaterializeRuntimeSampler(i, snapshot, specialization);
+			continue;
+		}
 		if (i < program.info.samplers.size()) {
 			auto source = program.info.samplers[i].source;
 			const auto* descriptor = Source(program, source);
@@ -2750,8 +2807,10 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 				if (WalkedActive(program, source) && !MaterializeIndirectDescriptor(
 				        program, source, i, 4u, 4u, observed, snapshot, snapshot.samplers,
 				        specialization.samplers,
-				        [](DescriptorValue&) { return true; }))
+				        [](DescriptorValue&) { return true; })) {
+					t_indirect_sampler_failure = true;
 					return resource_failed("sampler", i, source, snapshot.samplers.size());
+				}
 			} else {
 				if (indirect != nullptr) source = indirect->sources[0];
 				if (!evaluate(source, snapshot.samplers[i])) return false;

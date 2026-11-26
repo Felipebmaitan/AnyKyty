@@ -38,6 +38,7 @@ struct CompileOptions {
 	bool                        plain_mip_stats_variant    = false;
 	bool                        wave_lane_pairs            = false;
 	bool                        runtime_buffer_descriptors = false;
+	bool                        runtime_sampler_descriptors = false;
 };
 
 struct TranslateResult {

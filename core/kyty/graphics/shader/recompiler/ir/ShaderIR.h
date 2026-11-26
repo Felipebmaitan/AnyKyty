@@ -263,6 +263,15 @@ RawSignedStorageFormat(const ImageResource& image, Prospero::BufferFormat format
 
 struct SamplerResource {
 	static constexpr uint32_t NoIndirectSampler = UINT32_MAX;
+	static constexpr uint32_t RuntimeAddressClasses = 4u;
+	static constexpr uint32_t RuntimeFilterClasses  = 5u;
+	static constexpr uint32_t RuntimeMipClasses     = 3u;
+	static constexpr uint32_t RuntimePlainKeys =
+	    RuntimeAddressClasses * RuntimeAddressClasses * RuntimeFilterClasses * RuntimeMipClasses;
+	static constexpr uint32_t RuntimeUnnormalizedKeys = 2u;
+	static constexpr uint32_t RuntimeCompareKeys      = 8u * 2u * RuntimeAddressClasses;
+	static constexpr uint32_t RuntimeKeys = RuntimePlainKeys + RuntimeUnnormalizedKeys + RuntimeCompareKeys;
+	static constexpr uint32_t RuntimeAddressClassTable = 0x7764u;
 
 	uint32_t source                = 0;
 	uint32_t first_use_pc          = 0;
@@ -275,6 +284,7 @@ struct SamplerResource {
 	bool     depth_compare         = false;
 	bool     integer_border        = false;
 	bool     gather_lod            = false;
+	bool     runtime_descriptor    = false;
 
 	bool operator==(const SamplerResource& other) const = default;
 };

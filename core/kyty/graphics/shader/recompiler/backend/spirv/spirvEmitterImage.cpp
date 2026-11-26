@@ -873,6 +873,72 @@ struct ImageSampler {
 	bool dynamic = false;
 };
 
+uint32_t RuntimeSamplerOrdinal(ValueEmitContext& ctx, const IR::Inst& handle, bool compare) {
+	auto&      state = ctx.state;
+	const auto u32   = TypeU32(state);
+	const auto field = [&](uint32_t word, uint32_t offset, uint32_t mask) {
+		const auto shifted = offset == 0u ? word : Binary(state, spv::OpShiftRightLogical, u32, word,
+		                                                  ConstantU32(state, offset));
+		return Binary(state, spv::OpBitwiseAnd, u32, shifted, ConstantU32(state, mask));
+	};
+	const auto address_class = [&](uint32_t clamp) {
+		const auto shift = Binary(state, spv::OpShiftLeftLogical, u32, clamp, ConstantU32(state, 1u));
+		return Binary(state, spv::OpBitwiseAnd, u32,
+		              Binary(state, spv::OpShiftRightLogical, u32,
+		                     ConstantU32(state, IR::SamplerResource::RuntimeAddressClassTable), shift),
+		              ConstantU32(state, 3u));
+	};
+	const auto mul_add = [&](uint32_t value, uint32_t factor, uint32_t addend) {
+		return Binary(state, spv::OpIAdd, u32, Binary(state, spv::OpIMul, u32, value, ConstantU32(state, factor)),
+		              addend);
+	};
+	const auto w0         = ctx.Def(handle.Arg(0));
+	const auto w2         = ctx.Def(handle.Arg(2));
+	const auto address_x  = address_class(field(w0, 0u, 7u));
+	const auto mag        = field(w2, 20u, 3u);
+	const auto min        = field(w2, 22u, 3u);
+	const auto filters    = Binary(state, spv::OpBitwiseOr, u32, mag, min);
+	const auto linear     = Binary(state, spv::OpBitwiseAnd, u32, filters, ConstantU32(state, 1u));
+	uint32_t   key        = 0;
+	if (compare) {
+		const auto function = field(w0, 12u, 7u);
+		const auto index    = mul_add(Binary(state, spv::OpIAdd, u32,
+		                                     Binary(state, spv::OpShiftLeftLogical, u32, function,
+		                                            ConstantU32(state, 1u)),
+		                                     linear),
+		                              IR::SamplerResource::RuntimeAddressClasses, address_x);
+		key = Binary(state, spv::OpIAdd, u32, index,
+		             ConstantU32(state, IR::SamplerResource::RuntimePlainKeys +
+		                                    IR::SamplerResource::RuntimeUnnormalizedKeys));
+	} else {
+		const auto address_y = address_class(field(w0, 3u, 7u));
+		const auto aniso     = Binary(state, spv::OpINotEqual, TypeBool(state),
+		                              Binary(state, spv::OpBitwiseAnd, u32, filters, ConstantU32(state, 2u)),
+		                              ConstantU32(state, 0u));
+		const auto blend     = Binary(state, spv::OpBitwiseOr, u32,
+		                              Binary(state, spv::OpShiftLeftLogical, u32,
+		                                     Binary(state, spv::OpBitwiseAnd, u32, mag, ConstantU32(state, 1u)),
+		                                     ConstantU32(state, 1u)),
+		                              Binary(state, spv::OpBitwiseAnd, u32, min, ConstantU32(state, 1u)));
+		const auto filter    = Select(state, u32, aniso, ConstantU32(state, 4u), blend);
+		const auto mip_field = field(w2, 26u, 3u);
+		const auto mip       = Select(state, u32,
+		                              Binary(state, spv::OpULessThan, TypeBool(state), mip_field,
+		                                     ConstantU32(state, IR::SamplerResource::RuntimeMipClasses)),
+		                              mip_field, ConstantU32(state, IR::SamplerResource::RuntimeMipClasses - 1u));
+		const auto address   = mul_add(address_x, IR::SamplerResource::RuntimeAddressClasses, address_y);
+		const auto plain     = mul_add(mul_add(address, IR::SamplerResource::RuntimeFilterClasses, filter),
+		                               IR::SamplerResource::RuntimeMipClasses, mip);
+		const auto unnormalized =
+		    Binary(state, spv::OpINotEqual, TypeBool(state), field(w0, 15u, 1u), ConstantU32(state, 0u));
+		const auto unnormalized_key =
+		    Binary(state, spv::OpIAdd, u32, Binary(state, spv::OpBitwiseAnd, u32, mag, ConstantU32(state, 1u)),
+		           ConstantU32(state, IR::SamplerResource::RuntimePlainKeys));
+		key = Select(state, u32, unnormalized, unnormalized_key, plain);
+	}
+	return Binary(state, spv::OpIAdd, u32, key, ConstantU32(state, 1u));
+}
+
 std::array<ImageSampler, 2> LoadImageSamplers(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
 	const auto& mem = ctx.Memory(inst);
@@ -899,8 +965,11 @@ std::array<ImageSampler, 2> LoadImageSamplers(ValueEmitContext& ctx, const IR::I
 			const auto* handle = inst.Arg(1).ResolveInstruction();
 			if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetSamplerResource)
 				ctx.Fail(inst, "has invalid finite sampler key provenance");
-			auto selected = ctx.Def(handle->Arg(0));
-			if (samplers[index].indirect_root != IR::SamplerResource::NoIndirectSampler)
+			auto selected = samplers[index].runtime_descriptor
+			                    ? RuntimeSamplerOrdinal(ctx, *handle, samplers[index].depth_compare)
+			                    : ctx.Def(handle->Arg(0));
+			if (!samplers[index].runtime_descriptor &&
+			    samplers[index].indirect_root != IR::SamplerResource::NoIndirectSampler)
 				selected = IsRecordTableSource(state, samplers[index].source)
 				    ? EmitRecordTableIndex(state, selected, ctx.Def(handle->Arg(1)),
 				                           samplers[index].indirect_mapping_offset,

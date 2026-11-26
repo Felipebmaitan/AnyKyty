@@ -808,7 +808,8 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			                              options.shader_hash, empty, intersections));
 		}
 	}
-	IR::TrackResources(ir, *tracked, native_cfg, options.input_info, options.runtime_buffer_descriptors);
+	IR::TrackResources(ir, *tracked, native_cfg, options.input_info, options.runtime_buffer_descriptors,
+	                   options.runtime_sampler_descriptors);
 	TranslateResult result;
 	result.program        = std::move(ir);
 	result.oracle_sources      = std::move(oracle_sources);
@@ -859,6 +860,7 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 				                 ir.info.images[resource].table_capacity != 0u) ? 1u : 0u;
 			} else if (op == IR::ValueOpcode::GetSamplerResource) {
 				const auto resource = inst.Flags<uint32_t>();
+				if (resource < ir.info.samplers.size() && ir.info.samplers[resource].runtime_descriptor) continue;
 				first = resource < ir.info.samplers.size() &&
 				                !ir.info.samplers[resource].indirect_resources.empty() ? 1u : 0u;
 			} else {
