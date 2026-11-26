@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "graphics-precache"))
 import bundle
 import pass_coverage
+import resource_coverage
 
 
 def words(*values):
@@ -18,11 +19,13 @@ def sized(data):
     return words(len(data)) + data
 
 
-def reflect():
-    return sized(struct.pack("<4H", 0, 0, 0, 8))
+def reflect(resources=()):
+    table = b"".join(struct.pack("<H4B5HII", kind, slot, 0, 0, flags, 0, 0, 0, 0, 0, 0, 0)
+                     for kind, slot, flags in resources)
+    return sized(struct.pack("<4H", len(resources), 0, 0, 8 + len(table)) + table)
 
 
-def shader(kind, code):
+def shader(kind, code, resources=()):
     header = bytearray(96)
     struct.pack_into("<2I", header, 0, 0x34333231, 24)
     struct.pack_into("<2I", header, 64, 96, 64)
@@ -31,12 +34,12 @@ def shader(kind, code):
     footer[:8] = b"barefoot"
     struct.pack_into("<4I", footer, 16, 1, 4, 0, 0)
     program = b"sgaProg\0" + words(96, 64) + header + words(code, 0, 0, 0) + footer
-    return b"\x02a\0\x32" + sized(program) + bytes(152) + reflect()
+    return b"\x02a\0\x32" + sized(program) + bytes(152) + reflect(resources)
 
 
-def fixture(pixel_slot=1):
+def fixture(pixel_slot=1, vertex_resources=(), pixel_resources=()):
     header = b"SGD5" + bytes(8) + words(0) + reflect()
-    shaders = words(1) + shader(2, 0x100) + words(1) + shader(1, 0x200) + words(0, 0, 0, 0)
+    shaders = words(1) + shader(2, 0x100, vertex_resources) + words(1) + shader(1, 0x200, pixel_resources) + words(0, 0, 0, 0)
     arrays = words(1, 0, 1, 0, 0, 0, 0, 0)
     raster = bytearray(16)
     raster[0] = 3
@@ -69,10 +72,10 @@ class ShaderBundleTest(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
 
-    def read(self, data):
+    def read(self, data, include_resources=False):
         path = self.root / "fixture.bin"
         path.write_bytes(data)
-        return list(bundle.read_bundles(path, fixture_hash))
+        return list(bundle.read_bundles(path, fixture_hash, include_resources=include_resources))
 
     def test_reports_stable_references_and_selected_states(self):
         bundles = self.read(fixture())
@@ -130,6 +133,33 @@ class ShaderBundleTest(unittest.TestCase):
             self.read(fixture(pixel_slot=2))
         with self.assertRaisesRegex(ValueError, "exceeds the input"):
             self.read(fixture()[:-12])
+
+    def test_resource_declarations_constrain_dimensions_without_assigning_slots(self):
+        vertex = [(0x1C2, 7, 64), (0x430, 9, 0)]
+        pixel = [(0x302, 0, 0)]
+        groups = self.read(fixture(vertex_resources=vertex, pixel_resources=pixel), include_resources=True)
+        texture, buffer = groups[0]["stages"]["vs"][0]["resources"]
+        self.assertEqual(texture["texture_dimension"], "2DArray")
+        self.assertEqual(texture["serialized_slot"], 7)
+        self.assertEqual(texture["flags"], 64)
+        self.assertEqual(buffer["category"], 3)
+        self.assertIsNone(buffer["texture_dimension"])
+        manifests = self.root / "resources.kpm"
+        manifests.write_text("M a vs code=0000000000000100 si=n:Float/d:2DArray,n:Uint/d:2D/heap\n"
+                             "M b vs code=0000000000000100 si=n:Uint/d:2DArray\n"
+                             "M c ps code=0000000000000200 si=n:Float/d:3D/ir:2\n"
+                             "M d ps code=0000000000000300 si=n:Float/d:1D\n"
+                             "P v=a p=c\nP v=b p=d\n")
+        declarations = resource_coverage.index_declared_dimensions(groups)
+        report = resource_coverage.compare_manifest_resources(manifests, declarations)
+        self.assertEqual(report["shader_modules"], 4)
+        self.assertEqual(report["modules_with_comparable_shader_record"], 3)
+        self.assertEqual(report["image_modules_with_equal_dimension_set"], 2)
+        self.assertEqual(report["image_modules_with_any_dimension_agreement"], 3)
+        self.assertEqual(report["modules_with_indirect_table_or_heap_images"], 2)
+        self.assertEqual(report["undeclared_dimensions"], {"2D": 1})
+        self.assertEqual(report["runtime_numeric_classes"], {"Float": 3, "Uint": 2})
+        self.assertEqual(report["code_digests_with_varying_image_signatures"], 1)
 
 
 if __name__ == "__main__":

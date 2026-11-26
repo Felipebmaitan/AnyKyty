@@ -8,6 +8,7 @@ from pathlib import Path
 
 from catalog import xxhash
 from pass_coverage import compare_manifest_states, index_pass_states
+from resource_coverage import compare_manifest_resources, index_declared_dimensions, reflected_resources
 from session import fields, read_manifest
 
 
@@ -16,9 +17,10 @@ ALIGNMENT = 4096
 
 
 class BundleReader:
-    def __init__(self, data, start):
+    def __init__(self, data, start, include_resources=False):
         self.data = data
         self.position = start
+        self.include_resources = include_resources
 
     def skip(self, size):
         start = self.position
@@ -45,13 +47,15 @@ class BundleReader:
         if not name or name[-1] or b"\0" in name[:-1]:
             raise ValueError("invalid length-prefixed name")
 
-    def reflection(self, size=None):
+    def reflection(self, size=None, include_resources=False):
         table = self.sized() if size is None else self.take(size)
         resources, members, auxiliary, declared = struct.unpack_from("<4H", table)
         if declared != len(table) or 8 + 24 * (resources + members) + 8 * auxiliary > len(table):
             raise ValueError("invalid reflection table size")
+        if include_resources:
+            return reflected_resources(table, resources)
 
-    def shader(self, hash64):
+    def shader(self, hash64, *, metadata_bytes=152):
         self.name()
         version = self.take(1)[0]
         archive = self.sized()
@@ -69,9 +73,12 @@ class BundleReader:
         if footer_version != 1 or not instructions or length % 4 or align16(length) + align16(metadata) != code_size - 48:
             raise ValueError("invalid native shader program extent")
         program = archive[16 + header_size:16 + header_size + length]
-        self.skip(8 + 144)
-        self.reflection()
-        return {"code": f"{hash64(program, length):016x}", "native_kind": archive[16 + 90], "version": version}
+        self.skip(metadata_bytes)
+        resources = self.reflection(include_resources=self.include_resources)
+        result = {"code": f"{hash64(program, length):016x}", "native_kind": archive[16 + 90], "version": version}
+        if resources is not None:
+            result["resources"] = resources
+        return result
 
 
 def align16(size):
@@ -163,7 +170,7 @@ def read_effect(reader, stages):
                 rasterizer=rasterizer, depth_stencil=depth_stencil, blend=blend, passes=result)
 
 
-def read_bundles(path, hash64):
+def read_bundles(path, hash64, include_resources=False):
     if not path.stat().st_size:
         raise ValueError("empty shader bundle input")
     with path.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
@@ -171,7 +178,7 @@ def read_bundles(path, hash64):
         for offset in range(0, len(data) - 3, ALIGNMENT):
             if offset < end or data[offset:offset + 4] != b"SGD5":
                 continue
-            reader = BundleReader(data, offset + 12)
+            reader = BundleReader(data, offset + 12, include_resources)
             try:
                 binding_count = reader.word()
                 for _ in range(binding_count):
@@ -223,11 +230,14 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, help="write detailed private inventory JSON to a new file")
     parser.add_argument("--reference", action="append", default=[], type=Path, help="Kyty .kpm for shader pair comparison")
     parser.add_argument("--state-coverage", action="store_true", help="compare explicit raster and blend selections with references")
+    parser.add_argument("--resource-coverage", action="store_true", help="compare reflected image dimensions with references")
     args = parser.parse_args(argv)
     if args.state_coverage and not args.reference:
         parser.error("--state-coverage requires at least one --reference")
+    if args.resource_coverage and not args.reference:
+        parser.error("--resource-coverage requires at least one --reference")
     try:
-        bundles = list(read_bundles(args.asset, xxhash()))
+        bundles = list(read_bundles(args.asset, xxhash(), include_resources=args.resource_coverage))
         if not bundles:
             raise ValueError("no readable aligned SGD5 bundle found")
         summary, stage_pairs = summarize(bundles)
@@ -237,6 +247,10 @@ def main(argv=None):
             pass_states = index_pass_states(bundles)
             for result, path in zip(summary["references"], args.reference):
                 result["state_coverage"] = compare_manifest_states(path, pass_states)
+        if args.resource_coverage:
+            declarations = index_declared_dimensions(bundles)
+            for result, path in zip(summary["references"], args.reference):
+                result["resource_coverage"] = compare_manifest_resources(path, declarations)
         if args.output:
             with args.output.open("x", encoding="utf-8") as output:
                 json.dump(dict(summary=summary, bundles=bundles), output, separators=(",", ":"))

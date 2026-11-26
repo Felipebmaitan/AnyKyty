@@ -328,6 +328,8 @@ The optional inventory contains stage hashes, per-pass states and bindings, and 
 
 Add `--state-coverage` to compare explicitly selected states on candidate passes with the same vertex/pixel pair. It compares polygon mode, depth clip, alpha-to-coverage, blend enables and write masks against the values serialized by the Kyty manifest. Multiple candidates may disagree, and depth/stencil testing, cull mode and winding are dynamic Vulkan commands. The report gives field-level evidence without establishing pipeline identity. [Serialized fill modes](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_fill_mode)
 
+Add `--resource-coverage` to compare each shader's reflected texture dimensions with the views recorded in the reference manifest. A matching dimension set supports a candidate but supplies neither resource ordering nor numeric classes, view formats or indirect binding information. The optional inventory exports the declared texture dimensions alongside raw resource types, slots and flags. [Serialized resource types](https://github.com/rpatty-dev/PercyStar/blob/main/docs/SGD5-layout.md)
+
 ### AnyPS5 settings that an AnyKyty session also reads
 
 The window, the flip and vblank pacing, the guest memory and the thread priority of the presenter are AnyPS5's, so their `ANYPS5_*` and `APS5_*` settings apply with the Kyty backend. Each has its row in [ENVIRONMENT](ENVIRONMENT.md); this table says what it does here. Settings read only by AnyPS5's own GPU driver (`core/libs/prx/libSceAgcDriver/Execution/`, which this build does not compile) have no effect: `ANYPS5_PRESENT_MODE` is replaced by `KYTY_PRESENT_MODE`. `ANYPS5_GPU` is read by this build too.
