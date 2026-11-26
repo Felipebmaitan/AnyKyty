@@ -82,7 +82,7 @@ bool paceFlip(FlipRequest& req) {
 }
 
 std::uint32_t resolutionIndex(std::uint32_t width, std::uint32_t height) {
-    return (width >= 3840 || height >= 2160) ? VIDEO_OUT_RESOLUTION_2160P : VIDEO_OUT_RESOLUTION_1080P;
+    return (width >= 2560 && height >= 1440) ? VIDEO_OUT_RESOLUTION_2160P : VIDEO_OUT_RESOLUTION_1080P;
 }
 
 std::optional<std::uint32_t> configuredResolution() {
