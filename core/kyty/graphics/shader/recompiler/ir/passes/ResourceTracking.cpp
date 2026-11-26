@@ -513,8 +513,9 @@ private:
 class Tracker {
 public:
 	Tracker(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
-	        ShaderStageInputInfo input)
+	        ShaderStageInputInfo input, bool runtime_buffer_descriptors)
 	    : m_program(program), m_decoded(decoded), m_native_cfg(native_cfg), m_input(input),
+	      m_runtime_buffer_descriptors(runtime_buffer_descriptors),
 	      m_scalar_writes(std::move(program.scalar_writes)), m_info(program.info) {
 		std::ranges::sort(m_scalar_writes, {}, &Program::ScalarWrite::pc);
 		m_info.buffers.clear();
@@ -4516,6 +4517,7 @@ private:
 				if (inst.GetOpcode() == ValueOpcode::ImageSampleRaw) {
 					plan_handle(inst.Arg(1), 4u, memory.sampler * 4u, true);
 				}
+				if (m_runtime_buffer_descriptors && IndirectBufferAccess(inst)) continue;
 				plan_handle(inst.Arg(0), IndirectBufferAccess(inst) ? 4u : 8u,
 				            memory.resource * 4u, false);
 			}
@@ -5542,7 +5544,8 @@ private:
 				if (indirect_store) {
 					AddIndirectWriteTable(table_source, table_offset, flags.pc);
 				} else if (m_program.stage == ShaderType::Compute && handle != nullptr &&
-				           memory.kind == ResourceKind::Buffer && memory.SupportsIndirectBufferWrite(op) &&
+				           memory.kind == ResourceKind::Buffer &&
+				           (memory.SupportsIndirectBufferWrite(op) || memory.SupportsIndirectFormattedStore(op)) &&
 				           DerivesFromMemory(*handle)) {
 					CollectDmaBase(*handle, true);
 					m_program.has_address_writes = true;
@@ -5687,6 +5690,7 @@ private:
 	const Decoder::Program&                    m_decoded;
 	const CFG::Graph&                          m_native_cfg;
 	ShaderStageInputInfo                       m_input;
+	bool                                       m_runtime_buffer_descriptors = false;
 	std::vector<Program::ScalarWrite>          m_scalar_writes;
 	std::vector<ResolvedHandle>                m_resolved_handles;
 	std::vector<ScalarReadStep>                m_srt_walk;
@@ -5828,8 +5832,8 @@ UniformFillPlan RecognizeReplicateFill(Program& program, const Decoder::Program&
 }
 
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
-                    ShaderStageInputInfo input) {
-	Tracker(program, decoded, native_cfg, input).Run();
+                    ShaderStageInputInfo input, bool runtime_buffer_descriptors) {
+	Tracker(program, decoded, native_cfg, input, runtime_buffer_descriptors).Run();
 	program.uniform_fill = RecognizePatternFill(program, decoded, input);
 	if (program.uniform_fill.fill.kind == UniformFillKind::None) {
 		program.uniform_fill = RecognizeReplicateFill(program, decoded, input);

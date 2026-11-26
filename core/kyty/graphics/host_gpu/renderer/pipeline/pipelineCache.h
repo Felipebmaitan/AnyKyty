@@ -613,6 +613,7 @@ private:
 	ProgramKey                             m_lookup_key KYTY_GUARDED_BY(m_program_lock);
 	bool                                   m_guest_traversal KYTY_GUARDED_BY(m_program_lock) = false;
 	bool                                   m_lane_pairs KYTY_GUARDED_BY(m_program_lock)      = false;
+	std::unordered_set<uint64_t>           m_runtime_buffer_programs KYTY_GUARDED_BY(m_program_lock);
 	bool                                   m_queue_only KYTY_GUARDED_BY(m_program_lock)      = false;
 	bool                                   m_queued KYTY_GUARDED_BY(m_program_lock)          = false;
 	vk::PipelineCache             m_driver_cache = nullptr;

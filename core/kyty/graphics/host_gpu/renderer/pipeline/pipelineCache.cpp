@@ -567,6 +567,7 @@ std::vector<vk::Format> VertexInputFormats(const ShaderVertexInputInfo&         
 }
 
 constexpr uint32_t LanePairsKey = 0x574c5052u;
+constexpr uint32_t RuntimeBuffersKey = 0x52425546u;
 
 void SkipCallExpansionFailure(uint64_t hash, const ShaderRecompiler::ShaderSource& source) {
 	Common::HackNotice::Report("dispatch whose call tables do not expand skipped",
@@ -1746,6 +1747,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	if (m_lane_pairs) {
 		m_lookup_key.static_state.push_back(LanePairsKey);
 	}
+	const bool runtime_buffers = m_runtime_buffer_programs.contains(params.hash);
+	if (runtime_buffers) {
+		m_lookup_key.static_state.push_back(RuntimeBuffersKey);
+	}
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
@@ -1753,7 +1758,20 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		return &module;
 	};
 	bool       failed       = false;
-	const auto skip_failure = [&] {
+	bool       retry_runtime_buffers = false;
+	const auto skip_failure = [&]() KYTY_REQUIRES(m_program_lock) -> const ShaderModule* {
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			const auto found = m_program_cache.find(m_lookup_key);
+			if (!runtime_buffers && found != m_program_cache.end() &&
+			    ShaderRecompiler::IR::HasIndirectBuffers(found->second.resource_plan)) {
+				m_runtime_buffer_programs.insert(params.hash);
+				retry_runtime_buffers = true;
+				PipelineCacheLog("[kyty] compute shader 0x{:016x}: its buffer descriptors chosen in memory tables are "
+				                 "read at run time and its buffers reached by address",
+				                 params.hash);
+				return nullptr;
+			}
+		}
 		Common::HackNotice::Report("draw or dispatch with unresolvable resources skipped",
 		                           "PipelineCache::GetProgram", params.hash, 0);
 		return nullptr;
@@ -1813,7 +1831,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			specialized = true;
 #endif
 		}
-		if (failed) return skip_failure();
+		if (failed) {
+			skip_failure();
+			return retry_runtime_buffers ? GetProgram(params, input_info, push_data_cursor) : nullptr;
+		}
 #if defined(ANYPS5_KYTY)
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			const bool generic = specialized && !m_queue_only && ShaderRecompiler::IR::GenericComputeVariants();
@@ -1892,6 +1913,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	options.rt_oracle          = options.native_ray_tracing ? Config::RayTracingOracle() : 0u;
 	options.rt_emulation       = Config::RayTracingEmulation();
 	options.wave_lane_pairs    = m_lane_pairs;
+	options.runtime_buffer_descriptors = runtime_buffers;
 	ShaderRecompiler::ShaderSource source;
 	if (entry == m_program_cache.end()) {
 		DumpShader(params.code, fmt::format("original/{}_{:016x}.bin",
@@ -1960,6 +1982,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	if (Common::Fallback::Run("draw or dispatch skipped: the shader recompiler stopped",
 	                          "PipelineCache::GetProgram", params.hash, 0,
 	                          [&]() KYTY_NO_THREAD_SAFETY_ANALYSIS { built = build(); })) {
+		if (retry_runtime_buffers) return GetProgram(params, input_info, push_data_cursor);
 		return built;
 	}
 	if (const auto found = m_program_cache.find(m_lookup_key); found != m_program_cache.end()) {
@@ -3045,6 +3068,8 @@ void PipelineCache::RunCompileJob(CompileJob& job, InputInfo& input_info) {
 		options.rt_oracle          = options.native_ray_tracing ? Config::RayTracingOracle() : 0u;
 		options.rt_emulation       = Config::RayTracingEmulation();
 		options.wave_lane_pairs    = job.lane_pairs;
+		options.runtime_buffer_descriptors =
+		    !job.key.static_state.empty() && job.key.static_state.back() == RuntimeBuffersKey;
 		auto source = ShaderRecompiler::PrepareShaderSource(job.params.code, options);
 		if (!source.calls.empty() || source.unsupported_call_pc != UINT32_MAX) {
 			return;

@@ -6,7 +6,7 @@
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 void TrackResources(Program& program, const Decoder::Program& decoded, const CFG::Graph& native_cfg,
-                    ShaderStageInputInfo input);
+                    ShaderStageInputInfo input, bool runtime_buffer_descriptors = false);
 
 }
 

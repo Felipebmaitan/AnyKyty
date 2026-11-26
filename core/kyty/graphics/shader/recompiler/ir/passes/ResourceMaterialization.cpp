@@ -2462,6 +2462,13 @@ bool EmptyBuffersServe(const ResourcePlan& program, const ResourceSnapshot& snap
 }
 #endif
 
+bool HasIndirectBuffers(const ResourcePlan& program) {
+	return std::ranges::any_of(program.info.buffers, [&](const BufferResource& buffer) {
+		return buffer.source < program.descriptor_sources.size() &&
+		       program.descriptor_sources[buffer.source].indirect_descriptor.has_value();
+	});
+}
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	t_record_blocks.clear();

@@ -808,7 +808,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			                              options.shader_hash, empty, intersections));
 		}
 	}
-	IR::TrackResources(ir, *tracked, native_cfg, options.input_info);
+	IR::TrackResources(ir, *tracked, native_cfg, options.input_info, options.runtime_buffer_descriptors);
 	TranslateResult result;
 	result.program        = std::move(ir);
 	result.oracle_sources      = std::move(oracle_sources);

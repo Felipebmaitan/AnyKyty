@@ -114,6 +114,11 @@ struct MemoryInfo {
 		       (opcode == ValueOpcode::StoreBufferU32 || opcode == ValueOpcode::StoreBufferU32x2 ||
 		        opcode == ValueOpcode::StoreBufferU32x3 || opcode == ValueOpcode::StoreBufferU32x4);
 	}
+	[[nodiscard]] bool SupportsIndirectFormattedStore(ValueOpcode opcode) const {
+		return formatted && !typed && data_bits == 32u &&
+		       (opcode == ValueOpcode::StoreBufferU32 || opcode == ValueOpcode::StoreBufferU32x2 ||
+		        opcode == ValueOpcode::StoreBufferU32x3 || opcode == ValueOpcode::StoreBufferU32x4);
+	}
 	[[nodiscard]] bool SupportsIndirectBufferAtomic(ValueOpcode opcode) const {
 		if (formatted || typed || data_bits != 32u) return false;
 		switch (opcode) {
@@ -135,7 +140,8 @@ struct MemoryInfo {
 		return SupportsIndirectBufferStore(opcode) || SupportsIndirectBufferAtomic(opcode);
 	}
 	[[nodiscard]] bool SupportsIndirectBufferAccess(ValueOpcode opcode) const {
-		return SupportsIndirectBufferLoad(opcode) || SupportsIndirectBufferWrite(opcode);
+		return SupportsIndirectBufferLoad(opcode) || SupportsIndirectBufferWrite(opcode) ||
+		       SupportsIndirectFormattedStore(opcode);
 	}
 
 	bool operator==(const MemoryInfo& other) const = default;
