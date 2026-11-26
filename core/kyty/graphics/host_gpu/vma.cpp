@@ -169,7 +169,7 @@ static uint64_t MemoryBudgetCap() {
 }
 
 static std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> HeapSizeLimits(const GraphicContext& graphics) {
-	constexpr uint64_t DesktopReserve = 1536ull << 20u;
+	constexpr uint64_t DesktopReserve = 2048ull << 20u;
 	constexpr uint64_t LargeHeap      = 4ull << 30u;
 	std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> limits {};
 	limits.fill(VK_WHOLE_SIZE);
@@ -196,7 +196,7 @@ static std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> HeapSizeLimits(const Graphi
 		const uint64_t limit   = forced != UINT64_MAX ? std::min(forced, size) : available - reserve;
 		limits[heap] = limit;
 		LOGF("Vulkan memory: device-local heap %u of %" PRIu64 " MiB limited to %" PRIu64 " MiB (%s)\n", heap,
-		     size >> 20u, limit >> 20u, forced != UINT64_MAX ? "KYTY_MEMORY_BUDGET_MB" : "budget less 1.5 GiB");
+		     size >> 20u, limit >> 20u, forced != UINT64_MAX ? "KYTY_MEMORY_BUDGET_MB" : "budget less the desktop reserve");
 	}
 	return limits;
 }
