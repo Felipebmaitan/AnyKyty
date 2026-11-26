@@ -81,7 +81,14 @@ def inventory(args, binary):
                '--output', args.output / 'compute-recipes.txt']
     for image, mapping in bindings:
         command.extend(('--bindings', image, mapping))
-    return subprocess.run(command).returncode
+    recipes = subprocess.run(command)
+    if recipes.returncode != 0 or args.graphics_bundle is None:
+        return recipes.returncode
+    graphics = [sys.executable, tools / 'graphics-precache/bundle.py', args.graphics_bundle,
+                '--output', args.output / 'graphics-passes.json']
+    for image in dict.fromkeys(image for image, _ in bindings):
+        graphics.extend(('--embedded-image', image))
+    return subprocess.run(graphics).returncode
 
 
 def prepare(args, binary):
@@ -226,6 +233,8 @@ def main():
                       help='scan a locally relinked ELF and recover validated detached shader bindings')
     scan.add_argument('--bindings', type=Path, nargs=2, action='append', default=[], metavar=('IMAGE', 'MAP'),
                       help='resolve detached shader headers with verified creation argument file offsets')
+    scan.add_argument('--graphics-bundle', type=Path, metavar='ASSET',
+                      help='also export shipped shader stage pairs and render-state selections from a readable effect bundle')
     prep = commands.add_parser('prepare')
     prep.add_argument('store', type=Path)
     prep.add_argument('recipes', type=Path)
