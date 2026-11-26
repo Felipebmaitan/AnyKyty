@@ -370,6 +370,12 @@ static void PrepareRayQuery(RenderContext& context, const ShaderStageRuntime& st
 	bindings.shader_data[dword + 1] = static_cast<uint32_t>(address >> 32u);
 }
 
+static std::array<uint32_t, 3> MaxWorkGroups(const GraphicContext& graphics) {
+	const auto& limits = graphics.GetPhysicalDeviceProperties().limits;
+	return {std::max(limits.maxComputeWorkGroupCount[0], 1u), std::max(limits.maxComputeWorkGroupCount[1], 1u),
+	        std::max(limits.maxComputeWorkGroupCount[2], 1u)};
+}
+
 static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& input,
                              PreparedBindings& bindings, uint64_t indirect_args = 0) {
 	if (input.stage.module->info.bindings.descriptor_counts[
@@ -381,6 +387,10 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 		cache.ReadMemory(indirect_args, sizeof(vk::DispatchIndirectCommand));
 		std::memcpy(input.workgroup_counts, reinterpret_cast<const void*>(indirect_args),
 		            sizeof(input.workgroup_counts));
+	}
+	const auto groups = MaxWorkGroups(context.GetGraphics());
+	for (uint32_t axis = 0; axis < 3u; ++axis) {
+		input.workgroup_counts[axis] = std::min(input.workgroup_counts[axis], groups[axis]);
 	}
 	auto& storage = cache.GetUtilityBuffer(MemoryUsage::DeviceLocal);
 	const auto limit = std::min<uint64_t>(storage.Size(),
@@ -738,8 +748,53 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	record(input_info, 0);
 }
 
+struct IndirectThreadClamps {
+	static constexpr uint32_t Slots = 1024;
+
+	IndirectThreadClamps(GraphicContext& graphics, CommandScheduler& scheduler)
+	    : buffer(graphics, scheduler, MemoryUsage::Download, 0, AllFlags, uint64_t {Slots + 1u} * sizeof(uint32_t)) {
+		std::memset(buffer.Mapped().data(), 0, buffer.Size());
+		buffer.Flush(0, buffer.Size());
+	}
+
+	uint32_t Acquire() {
+		Common::LockGuard lock(mutex);
+		for (uint32_t tries = 0; tries < Slots; ++tries) {
+			const auto slot = next++ % Slots;
+			if (!pending[slot]) {
+				pending[slot] = true;
+				return slot;
+			}
+		}
+		return Slots;
+	}
+
+	void Finish(uint32_t slot, uint64_t shader_hash) {
+		if (slot >= Slots) return;
+		const auto offset = uint64_t {slot} * sizeof(uint32_t);
+		buffer.Invalidate(offset, sizeof(uint32_t));
+		uint32_t clamped = 0;
+		std::memcpy(&clamped, buffer.Mapped().data() + offset, sizeof(clamped));
+		if (clamped != 0u) {
+			Common::HackNotice::Report("indirect dispatch group count clamped to maxComputeWorkGroupCount on the GPU",
+			                           "IndirectThreadPass", shader_hash, 0);
+			std::memset(buffer.Mapped().data() + offset, 0, sizeof(clamped));
+			buffer.Flush(offset, sizeof(clamped));
+		}
+		Common::LockGuard lock(mutex);
+		pending[slot] = false;
+	}
+
+	Buffer                    buffer;
+	Common::Mutex             mutex;
+	std::array<bool, Slots>   pending {};
+	uint32_t                  next = 0;
+};
+
 struct IndirectThreadPass {
-	IndirectThreadPass(GraphicContext& graphics, CommandScheduler& scheduler): graphics(graphics) {
+	IndirectThreadPass(GraphicContext& graphics, CommandScheduler& scheduler)
+	    : graphics(graphics), scheduler(scheduler), max_groups(MaxWorkGroups(graphics)),
+	      clamps(std::make_shared<IndirectThreadClamps>(graphics, scheduler)) {
 		const vk::DescriptorSetLayoutBinding bindings[] {
 		    {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
 		    {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
@@ -774,13 +829,6 @@ struct IndirectThreadPass {
 		    graphics.device.createComputePipelines(nullptr, 1, &pipeline_info, nullptr, &pipeline);
 		graphics.device.destroyShaderModule(module, nullptr);
 		RequireVulkanSuccess(result, "create indirect-thread pipeline");
-		const auto& limits = graphics.GetPhysicalDeviceProperties().limits;
-		for (uint32_t axis = 0; axis < 3u; ++axis) {
-			max_groups[axis] = std::max(limits.maxComputeWorkGroupCount[axis], 1u);
-		}
-		clamps = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Download, 0, AllFlags, ClampBytes);
-		std::memset(clamps->Mapped().data(), 0, ClampBytes);
-		clamps->Flush(0, ClampBytes);
 	}
 	~IndirectThreadPass() {
 		graphics.device.destroyPipeline(pipeline, nullptr);
@@ -796,23 +844,14 @@ struct IndirectThreadPass {
 		uint32_t limit_index;
 		uint32_t padding[2];
 		uint32_t max_groups[3];
-		uint32_t shader_hash[2];
+		uint32_t clamp_slot;
 	};
 
-	[[nodiscard]] bool Exceeds(const vk::DispatchIndirectCommand& args) const {
-		return args.x > max_groups[0] || args.y > max_groups[1] || args.z > max_groups[2];
-	}
-
-	[[nodiscard]] vk::DispatchIndirectCommand Clamp(vk::DispatchIndirectCommand args) const {
-		args.x = std::min(args.x, max_groups[0]);
-		args.y = std::min(args.y, max_groups[1]);
-		args.z = std::min(args.z, max_groups[2]);
-		return args;
-	}
-
 	template <typename Recorder>
-	void Record(const Recorder& vk_buffer, const vk::DescriptorBufferInfo (&infos)[3], Push push) const {
-		const vk::DescriptorBufferInfo all[] {infos[0], infos[1], infos[2], {clamps->Handle(), 0, ClampBytes}};
+	void Record(const Recorder& vk_buffer, const vk::DescriptorBufferInfo (&infos)[3], Push push,
+	            uint64_t shader_hash) {
+		const vk::DescriptorBufferInfo all[] {infos[0], infos[1], infos[2],
+		                                      {clamps->buffer.Handle(), 0, clamps->buffer.Size()}};
 		std::array<vk::WriteDescriptorSet, 4> writes {};
 		for (uint32_t index = 0; index < writes.size(); ++index) {
 			writes[index].dstBinding      = index;
@@ -820,7 +859,8 @@ struct IndirectThreadPass {
 			writes[index].descriptorType  = vk::DescriptorType::eStorageBuffer;
 			writes[index].pBufferInfo     = &all[index];
 		}
-		std::copy(std::begin(max_groups), std::end(max_groups), std::begin(push.max_groups));
+		std::copy(max_groups.begin(), max_groups.end(), std::begin(push.max_groups));
+		push.clamp_slot = clamps->Acquire();
 		vk::MemoryBarrier before {};
 		before.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite |
 		                       vk::AccessFlagBits::eHostWrite;
@@ -834,34 +874,26 @@ struct IndirectThreadPass {
 		vk_buffer.dispatch(1, 1, 1);
 		vk::MemoryBarrier after {};
 		after.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-		after.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead |
-		                      vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eUniformRead;
+		after.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead | vk::AccessFlagBits::eShaderRead |
+		                      vk::AccessFlagBits::eUniformRead | vk::AccessFlagBits::eHostRead;
 		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
 		                          vk::PipelineStageFlagBits::eDrawIndirect |
-		                              vk::PipelineStageFlagBits::eComputeShader,
+		                              vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eHost,
 		                          {}, 1, &after, 0, nullptr, 0, nullptr);
-	}
-
-	void ReportClamps() {
-		clamps->Invalidate(0, 3 * sizeof(uint32_t));
-		uint32_t words[3] {};
-		std::memcpy(words, clamps->Mapped().data(), sizeof(words));
-		const uint64_t shader_hash = words[1] | (uint64_t {words[2]} << 32u);
-		for (; reported != words[0]; ++reported) {
-			Common::HackNotice::Report("indirect dispatch group count clamped to maxComputeWorkGroupCount on the GPU",
-			                           "IndirectThreadPass", shader_hash, 0);
+		if (push.clamp_slot < IndirectThreadClamps::Slots) {
+			scheduler.DeferHostOperation([clamps = clamps, slot = push.clamp_slot, shader_hash] {
+				clamps->Finish(slot, shader_hash);
+			});
 		}
 	}
 
-	static constexpr uint64_t ClampBytes = 256;
-
-	GraphicContext&         graphics;
-	vk::DescriptorSetLayout descriptor_layout = nullptr;
-	vk::PipelineLayout      pipeline_layout   = nullptr;
-	vk::Pipeline            pipeline          = nullptr;
-	uint32_t                max_groups[3] {};
-	std::unique_ptr<Buffer> clamps;
-	uint32_t                reported = 0;
+	GraphicContext&                       graphics;
+	CommandScheduler&                     scheduler;
+	vk::DescriptorSetLayout               descriptor_layout = nullptr;
+	vk::PipelineLayout                    pipeline_layout   = nullptr;
+	vk::Pipeline                          pipeline          = nullptr;
+	std::array<uint32_t, 3>               max_groups {};
+	std::shared_ptr<IndirectThreadClamps> clamps;
 };
 
 static IndirectThreadPass& ThreadPass(
@@ -973,10 +1005,7 @@ void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t arg
 	push.args_index     = static_cast<uint32_t>((args_offset - args_base) / sizeof(uint32_t));
 	push.groups_index   = 0;
 	push.limit_index    = thread_limit ? program.bindings.dispatch_thread_dword : 4u;
-	push.shader_hash[0] = static_cast<uint32_t>(program.shader_hash);
-	push.shader_hash[1] = static_cast<uint32_t>(program.shader_hash >> 32u);
-	pass.ReportClamps();
-	pass.Record(vk_buffer, infos, push);
+	pass.Record(vk_buffer, infos, push, program.shader_hash);
 
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
@@ -1071,13 +1100,14 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		if (rt_pass == 1) {
 			RtCheck().Before(bindings);
 		}
-		auto&      pass            = ThreadPass(m_indirect_thread_pass, m_context);
 		auto&      stream          = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 		vk::Buffer dispatch_buffer = args_buffer->Handle();
 		uint64_t   dispatch_offset = args_offset;
 		if (cpu_args) {
-			if (pass.Exceeds(args)) {
-				const auto clamped = pass.Clamp(args);
+			const auto limits = MaxWorkGroups(m_context.GetGraphics());
+			if (args.x > limits[0] || args.y > limits[1] || args.z > limits[2]) {
+				const vk::DispatchIndirectCommand clamped {std::min(args.x, limits[0]), std::min(args.y, limits[1]),
+				                                           std::min(args.z, limits[2])};
 				dispatch_offset    = m_context.GetBufferCache().StreamUpload(&clamped, sizeof(clamped), 16);
 				dispatch_buffer    = stream.Handle();
 				Common::HackNotice::Report("indirect dispatch group count clamped to maxComputeWorkGroupCount",
@@ -1101,10 +1131,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 			push.args_index     = static_cast<uint32_t>((args_offset - args_base) / sizeof(uint32_t));
 			push.groups_index   = 0;
 			push.limit_index    = 4;
-			push.shader_hash[0] = static_cast<uint32_t>(program.shader_hash);
-			push.shader_hash[1] = static_cast<uint32_t>(program.shader_hash >> 32u);
-			pass.ReportClamps();
-			pass.Record(buffer.Handle(), infos, push);
+			ThreadPass(m_indirect_thread_pass, m_context).Record(buffer.Handle(), infos, push, program.shader_hash);
 			dispatch_buffer = stream.Handle();
 			dispatch_offset = scratch_offset;
 		}

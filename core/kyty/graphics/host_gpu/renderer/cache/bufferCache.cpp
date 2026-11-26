@@ -25,6 +25,7 @@
 #include <bit>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -2497,9 +2498,25 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 		return false;
 	}
 	NoteReadbackWait(readback_begin, readback_end, device_address, false);
+#if defined(ANYPS5_KYTY)
+	const auto submit_from = std::chrono::steady_clock::now();
+	bool       submit_reported = false;
+	for (uint32_t spins = 0; m_scheduler.SubmittedTick() < needed; ++spins) {
+		if (!submit_reported && (spins & 1023u) == 1023u &&
+		    std::chrono::steady_clock::now() - submit_from >= std::chrono::seconds(10)) {
+			submit_reported = true;
+			std::fprintf(stderr,
+			             "[kyty] a readback of 0x%" PRIx64 "-0x%" PRIx64 " has waited 10 s for tick %" PRIu64
+			             " to be submitted (submitted %" PRIu64 ")\n",
+			             readback_begin, readback_end, needed, m_scheduler.SubmittedTick());
+		}
+		Common::SpinPause();
+	}
+#else
 	while (m_scheduler.SubmittedTick() < needed) {
 		Common::SpinPause();
 	}
+#endif
 	auto& device = m_graphics.device;
 	if (!m_readback.pool) {
 		vk::CommandPoolCreateInfo pool_info {};
@@ -2570,10 +2587,26 @@ bool BufferCache::DownloadOnReadbackQueue(Buffer& buffer, std::span<const vk::Bu
 			EXIT("BufferCache: readback queue wait failed: %s\n", vk::to_string(status).c_str());
 		}
 		if ((spins & 1023u) == 1023u && std::chrono::steady_clock::now() - spin_from >= SpinLimit) {
-			m_scheduler.GetMasterSemaphore().ReportStall(needed);
+			const auto report = [&] {
+				auto& master = m_scheduler.GetMasterSemaphore();
+				master.Refresh();
+				if (needed != 0 && !master.IsFree(needed)) {
+					master.ReportStall(needed);
+					return;
+				}
+				static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+				if (!reported.test_and_set()) {
+					std::fprintf(stderr,
+					             "[kyty] a readback copy of 0x%" PRIx64 "-0x%" PRIx64 " on the readback queue has not "
+					             "finished in 10 s although the GPU reached its tick %" PRIu64 " (GPU at %" PRIu64
+					             "): the readback queue is stuck\n",
+					             readback_begin, readback_end, needed, master.KnownGpuTick());
+				}
+			};
+			report();
 			auto result = device.waitForFences(1, &m_readback.fence, VK_TRUE, StallNs);
 			while (result == vk::Result::eTimeout) {
-				m_scheduler.GetMasterSemaphore().ReportStall(needed);
+				report();
 				result = device.waitForFences(1, &m_readback.fence, VK_TRUE, StallNs);
 			}
 			if (result != vk::Result::eSuccess) {

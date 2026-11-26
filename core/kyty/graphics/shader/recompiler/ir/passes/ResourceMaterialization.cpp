@@ -2262,8 +2262,37 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	plan.uniform_fill.element_count = Clone(plan.uniform_fill.element_count);
 	plan.capture_specialization_reads |=
 	    capture_indirect_reads || capture_control_reads || !plan.source_reads.empty();
+	const bool scalar_plan_reads = std::ranges::all_of(plan.value_storage, [&](const Inst& node) {
+		switch (node.GetOpcode()) {
+			case ValueOpcode::ReadConstBuffer:
+			case ValueOpcode::LoadAddressU32: {
+				const auto index = node.Flags<MemoryFlags>().index;
+				if (index >= plan.memory_info.size()) return false;
+				const auto kind = plan.memory_info[index].kind;
+				return kind == ResourceKind::ScalarBuffer || kind == ResourceKind::ScalarAddress;
+			}
+			case ValueOpcode::LoadAddressU8:
+			case ValueOpcode::LoadAddressU16:
+			case ValueOpcode::LoadDeviceAddressU32:
+			case ValueOpcode::LoadBufferU8:
+			case ValueOpcode::LoadBufferU16:
+			case ValueOpcode::LoadBufferU32:
+			case ValueOpcode::LoadBufferU32x2:
+			case ValueOpcode::LoadBufferU32x3:
+			case ValueOpcode::LoadBufferU32x4:
+			case ValueOpcode::LoadSharedU8:
+			case ValueOpcode::LoadSharedU16:
+			case ValueOpcode::LoadSharedU32:
+			case ValueOpcode::LoadSharedU32x2:
+			case ValueOpcode::LoadSharedU32x3:
+			case ValueOpcode::LoadSharedU32x4:
+			case ValueOpcode::LoadRelativeVgpr: return false;
+			default: return true;
+		}
+	});
 	const bool scalar_compute_tables =
-	    program.stage == ShaderType::Compute && plan.source_reads.empty() &&
+	    program.stage == ShaderType::Compute && plan.source_reads.empty() && scalar_plan_reads &&
+	    !program.scalar_cache_invalidates &&
 	    std::ranges::all_of(plan.descriptor_sources, [](const DescriptorSource& source) {
 		    const auto& indirect = source.indirect_descriptor;
 		    return !indirect || (indirect->table_scalar && !indirect->selector && !indirect->pointer_table);

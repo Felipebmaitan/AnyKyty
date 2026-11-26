@@ -986,6 +986,7 @@ struct Program: ResourcePlan {
 	std::vector<ScalarWrite>      scalar_writes;
 	std::vector<ExportInfo>       export_info;
 	bool                          has_address_writes = false;
+	bool                          scalar_cache_invalidates = false;
 	bool                          shader_info_complete = false;
 	Bindings                      bindings;
 	bool                          table_mode = false;

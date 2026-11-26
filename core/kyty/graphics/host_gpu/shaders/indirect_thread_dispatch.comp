@@ -24,8 +24,7 @@ layout(push_constant) uniform push_data {
     uint  groups_index;
     uint  limit_index;
     uvec3 max_groups;
-    uint  hash_lo;
-    uint  hash_hi;
+    uint  clamp_slot;
 };
 
 void main() {
@@ -42,8 +41,6 @@ void main() {
         limit[limit_index + axis]   = threads;
     }
     if (over) {
-        atomicAdd(clamped[0], 1u);
-        clamped[1] = hash_lo;
-        clamped[2] = hash_hi;
+        clamped[clamp_slot] = 1u;
     }
 }
