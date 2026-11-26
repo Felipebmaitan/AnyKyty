@@ -519,6 +519,7 @@ private:
 	struct SamplerMemoEntry {
 		std::array<uint32_t, 4> fields {};
 		bool                    integer_border = false;
+		bool                    depth_compare  = false;
 		vk::Sampler             sampler        = nullptr;
 	};
 	std::array<SamplerMemoEntry, 256> m_sampler_memo {};

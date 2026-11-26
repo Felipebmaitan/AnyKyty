@@ -113,7 +113,9 @@ bool SpecializeDirectResources(const ResourcePlan& program, ResourceSnapshot& sn
 
 bool ImageTableSlotCompatible(const ImageResource& root, const DescriptorValue& descriptor);
 
-void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);
+DescriptorValue RuntimeSamplerCandidate(const SamplerResource& sampler);
+uint64_t ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization,
+                                 uint32_t sampler_limit = UINT32_MAX);
 
 bool ResourceSpecializationFits(const Program& program, const ResourceSpecialization& specialization);
 

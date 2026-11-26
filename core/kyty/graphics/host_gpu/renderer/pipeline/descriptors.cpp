@@ -980,7 +980,7 @@ RenderExecutor::MakeTextureDescKey(const ShaderRecompiler::IR::ImageResource&   
 	    (static_cast<uint32_t>(resource.atomic) << 2u) |
 	    (static_cast<uint32_t>(resource.depth_compare) << 3u) |
 	    (static_cast<uint32_t>(resource.cube) << 4u) | (static_cast<uint32_t>(resource.r128) << 5u) |
-	    (static_cast<uint32_t>(resource.heap) << 6u);
+	    (static_cast<uint32_t>(resource.heap) << 6u) | (static_cast<uint32_t>(resource.skip_degamma) << 7u);
 	return key;
 }
 
@@ -1428,8 +1428,9 @@ RenderExecutor::ResolveTableElement(TableResolution&                            
 vk::Sampler RenderExecutor::NativeSampler(const ShaderRecompiler::IR::CompiledShaderInfo& program,
                                           uint32_t                                        index,
                                           const ShaderRecompiler::IR::DescriptorValue&    value) {
-	auto        descriptor = DecodeNativeDescriptor<ShaderSamplerResource>(value);
-	const auto& sampler    = program.info.samplers[index];
+	const auto& sampler = program.info.samplers[index];
+	auto descriptor = DecodeNativeDescriptor<ShaderSamplerResource>(
+	    sampler.runtime_descriptor ? ShaderRecompiler::IR::RuntimeSamplerCandidate(sampler) : value);
 	if (!sampler.depth_compare) {
 		descriptor.fields[0] &= ~(0x7u << 12u);
 	}
@@ -1437,17 +1438,19 @@ vk::Sampler RenderExecutor::NativeSampler(const ShaderRecompiler::IR::CompiledSh
 		descriptor.SetPointFiltering();
 	}
 	uint64_t hash = sampler.integer_border ? 0x9e3779b97f4a7c15ull : 0;
+	hash ^= static_cast<uint64_t>(sampler.depth_compare);
 	for (const auto field: descriptor.fields) {
 		hash = (hash ^ field) * 0x100000001b3ull;
 	}
 	auto& entry = m_sampler_memo[(hash ^ (hash >> 32u)) % m_sampler_memo.size()];
-	if (entry.sampler != nullptr && entry.integer_border == sampler.integer_border &&
+	if (entry.sampler != nullptr && entry.integer_border == sampler.integer_border && entry.depth_compare == sampler.depth_compare &&
 	    std::memcmp(entry.fields.data(), descriptor.fields, sizeof(entry.fields)) == 0) {
 		return entry.sampler;
 	}
-	const auto native = m_context.GetSamplerCache().GetSampler(descriptor, sampler.integer_border);
+	const auto native = m_context.GetSamplerCache().GetSampler(descriptor, sampler.integer_border, sampler.depth_compare);
 	std::memcpy(entry.fields.data(), descriptor.fields, sizeof(entry.fields));
 	entry.integer_border = sampler.integer_border;
+	entry.depth_compare  = sampler.depth_compare;
 	entry.sampler        = native;
 	return native;
 }

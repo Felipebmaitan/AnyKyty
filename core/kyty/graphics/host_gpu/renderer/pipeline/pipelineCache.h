@@ -670,11 +670,11 @@ private:
 	const ShaderModule* GetAhead(const ShaderParams& params, InputInfo& input_info,
 	                             uint32_t& push_data_cursor, ProgramResolution& ahead)
 	    KYTY_NO_THREAD_SAFETY_ANALYSIS;
-	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
+	const ShaderModule* CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,
 	                            uint32_t push_data_cursor, std::span<const uint32_t> code);
-	ShaderModule BuildModule(const ProgramKey& key, const ShaderRecompiler::CompileOptions& options,
+	std::optional<ShaderModule> BuildModule(const ProgramKey& key, const ShaderRecompiler::CompileOptions& options,
 	                         ShaderRecompiler::TranslateResult                   translated,
 	                         const ShaderRecompiler::IR::ResourceSpecialization& specialization,
 	                         std::span<const uint32_t> function_code, uint32_t push_data_cursor,
@@ -871,6 +871,7 @@ private:
 #if defined(ANYPS5_KYTY)
 	void RequestComputePipelineAhead(const ShaderModule& module);
 #endif
+	bool SampledDescriptorBudgetFits(std::span<const ShaderModule* const> stages) const;
 	void ClaimPipeline(const GraphicsPipelineKey& key);
 	void ClaimComputePipeline(uint64_t module_id);
 	bool InitializeDriverCache();
@@ -958,6 +959,9 @@ private:
 	static constexpr uint32_t MappedRank = NoRank - 1;
 	[[nodiscard]] uint32_t    UseRank(uint64_t program_hash) const;
 };
+
+inline constexpr uint32_t RuntimeBuffersKey = 0x52425546u;
+inline constexpr uint32_t RuntimeSamplersKey = 0x53414d50u;
 
 void AppendNativeRayTracingKey(ShaderType stage, std::vector<uint32_t>& key, bool native = true);
 

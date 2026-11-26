@@ -2537,6 +2537,10 @@ void PipelineCache::BuildManifestModule(uint32_t index, std::span<const uint32_t
 	    input);
 	const bool native = RayTracing::NativeTraversals() && !guest_traversal;
 	AppendNativeRayTracingKey(options.stage, key.static_state, native);
+	options.runtime_buffer_descriptors = record.runtime_buffers;
+	options.runtime_sampler_descriptors = record.runtime_samplers;
+	if (record.runtime_buffers) key.static_state.push_back(RuntimeBuffersKey);
+	if (record.runtime_samplers) key.static_state.push_back(RuntimeSamplersKey);
 	options.shader_hash        = key.hash;
 	options.user_data          = user_data;
 	options.back_code          = back_code;
@@ -2704,7 +2708,7 @@ void PipelineCache::CreateManifestPipeline(uint32_t index) {
 	if (record.plain_pixel && stages[3] != nullptr) {
 		stages[3] = stages[3]->plain.get();
 	}
-	if (stages[0] == nullptr ||
+	if (!SampledDescriptorBudgetFits(stages) || stages[0] == nullptr ||
 	    (record.stages[3] != ManifestPipeline::NoStage && stages[3] == nullptr)) {
 		std::scoped_lock lock(state.mutex);
 		state.pipelines_failed++;
@@ -2865,6 +2869,8 @@ void PipelineCache::RecordModule(const ProgramKey&                       key,
 	                       .code_hash        = key.hash,
 	                       .user_data_count  = key.user_data_count,
 	                       .push_data_cursor = push_data_cursor,
+	                       .runtime_buffers  = options.runtime_buffer_descriptors,
+	                       .runtime_samplers = options.runtime_sampler_descriptors,
 	                       .specialization   = module.specialization};
 	if (!options.back_code.empty()) {
 		record.code_hash = XXH3_64bits(code.data(), code.size_bytes());

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #if defined(ANYPS5_KYTY)
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #endif
@@ -568,8 +569,6 @@ std::vector<vk::Format> VertexInputFormats(const ShaderVertexInputInfo&         
 }
 
 constexpr uint32_t LanePairsKey = 0x574c5052u;
-constexpr uint32_t RuntimeBuffersKey = 0x52425546u;
-constexpr uint32_t RuntimeSamplersKey = 0x53414d50u;
 
 void SkipCallExpansionFailure(uint64_t hash, const ShaderRecompiler::ShaderSource& source) {
 	Common::HackNotice::Report("dispatch whose call tables do not expand skipped",
@@ -1411,7 +1410,7 @@ ShaderModule* PipelineCache::Program::MatchModule(uint32_t push_data_cursor) {
 	return &*found;
 }
 
-ShaderModule PipelineCache::BuildModule(const ProgramKey&                                  key,
+std::optional<ShaderModule> PipelineCache::BuildModule(const ProgramKey&                                  key,
                                        const ShaderRecompiler::CompileOptions&            options,
                                        ShaderRecompiler::TranslateResult                  translated,
                                        const ShaderRecompiler::IR::ResourceSpecialization& specialization,
@@ -1425,9 +1424,19 @@ ShaderModule PipelineCache::BuildModule(const ProgramKey&                       
 	const auto profile         = SpirvProfile(m_graphics);
 	auto       compile_options = options;
 	compile_options.profile    = &profile;
+	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
+	compile_options.sampler_limit = std::min(limits.maxPerStageDescriptorSamplers, limits.maxDescriptorSetSamplers);
 	compile_options.plain_mip_stats_variant = key.stage == ShaderType::Pixel;
 	auto result = ShaderRecompiler::CompileProgram(std::move(translated), compile_options,
 	                                               specialization, push_data_cursor);
+	if (result.required_samplers > compile_options.sampler_limit) {
+		const auto reason = fmt::format("{} sampler descriptors exceed the device limit of {}",
+		                                result.required_samplers, compile_options.sampler_limit);
+		Common::HackNotice::Report("shader exceeds sampler descriptor budget", "PipelineCache::BuildModule",
+		                           key.hash, result.required_samplers, reason);
+		if (table_refusal != nullptr) *table_refusal = reason;
+		return {};
+	}
 	if (compile_options.table_mode && result.spirv.empty()) {
 		if (table_refusal != nullptr) *table_refusal = std::move(result.table_refusal);
 		return {};
@@ -1445,11 +1454,13 @@ ShaderModule PipelineCache::BuildModule(const ProgramKey&                       
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
 	ShaderModule module {
 	    .id             = id,
-	    .module         = CompileSPV(result.spirv, m_graphics.device),
 	    .info           = std::move(info),
 	    .specialization = specialization,
 	    .function_code  = {function_code.begin(), function_code.end()},
 	};
+	const std::array<const ShaderModule*, 1> stages {&module};
+	if (!SampledDescriptorBudgetFits(stages)) return {};
+	module.module = CompileSPV(result.spirv, m_graphics.device);
 	module.spirv_words = static_cast<uint32_t>(result.spirv.size());
 	if (key.stage == ShaderType::Vertex || key.stage == ShaderType::Local) {
 		module.vertex_formats = VertexInputFormats(*options.input_info.vertex, module.info);
@@ -1530,19 +1541,25 @@ void PipelineCache::DestroyModule(const ShaderModule& module) const {
 	}
 }
 
-ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& key,
+const ShaderModule* PipelineCache::CompileModule(Program& program, const ProgramKey& key,
                                            ShaderRecompiler::CompileOptions  options,
                                            ShaderRecompiler::TranslateResult translated,
                                            uint32_t                          push_data_cursor,
                                            std::span<const uint32_t>         code) {
 	std::vector<uint32_t> spirv;
 	std::vector<uint32_t> plain_spirv;
-	auto& module = program.modules.emplace_back(
-	    BuildModule(key, options, std::move(translated), program.specialization,
-	                program.FunctionCode(), push_data_cursor, spirv, plain_spirv));
+	auto built = BuildModule(key, options, std::move(translated), program.specialization,
+	                         program.FunctionCode(), push_data_cursor, spirv, plain_spirv);
+	if (!built) {
+#if defined(ANYPS5_KYTY)
+		program.NoteFailed(push_data_cursor);
+#endif
+		return nullptr;
+	}
+	auto& module = program.modules.emplace_back(std::move(*built));
 	module.plan = &program.resource_plan;
 	AddedModule(key, program, module, spirv, plain_spirv, options, code, push_data_cursor);
-	return module;
+	return &module;
 }
 
 #if defined(ANYPS5_KYTY)
@@ -2015,8 +2032,9 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		WidenComputeVariant(entry->first, entry->second, params, input_info, push_data_cursor, natural);
 	}
 #endif
-	return bind(CompileModule(entry->second, entry->first, options, std::move(translated),
-	                          push_data_cursor, params.code));
+	const auto* module = CompileModule(entry->second, entry->first, options, std::move(translated),
+	                                   push_data_cursor, params.code);
+	return module != nullptr ? bind(*module) : nullptr;
 #if defined(ANYPS5_KYTY)
 	};
 	const ShaderModule* built = nullptr;
@@ -3471,6 +3489,7 @@ void PipelineCache::RunChain(ChainJob& job) {
 	for (uint32_t i = 0; i < stages.size(); i++) {
 		key.stage_ids[i] = stages[i] != nullptr ? stages[i]->id : 0;
 	}
+	if (!SampledDescriptorBudgetFits(stages)) return;
 	m_libraries->PrepareNow(key, stages, false);
 	m_chain_prepared.fetch_add(1, std::memory_order_relaxed);
 }
@@ -3583,6 +3602,39 @@ void PipelineCache::AsyncPipelineWorker() {
 			m_async_pending_graphics.erase(job.key);
 		}
 	}
+}
+
+bool PipelineCache::SampledDescriptorBudgetFits(std::span<const ShaderModule* const> stages) const {
+	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
+	using namespace ShaderRecompiler::IR;
+	uint64_t total = 0;
+	uint64_t total_images = 0;
+	for (const auto* stage: stages) {
+		if (stage == nullptr) continue;
+		const auto& bindings = stage->info.bindings;
+		const auto count = bindings.descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Samplers)];
+		total += count;
+		if (count > limits.maxPerStageDescriptorSamplers || total > limits.maxDescriptorSetSamplers) {
+			Common::HackNotice::Report("pipeline exceeds sampler descriptor budget", "PipelineCache",
+			                           stage->info.shader_hash, total);
+			return false;
+		}
+		uint64_t images = 0, resources = 0;
+		for (auto mask = bindings.descriptor_mask; mask != 0; mask &= mask - 1u) {
+			const auto index = std::countr_zero(mask);
+			const auto kind = static_cast<DescriptorBindingKind>(index);
+			if (kind != DescriptorBindingKind::Samplers) resources += bindings.descriptor_counts[index];
+			if (ImageBindingResourceClass(kind) == ImageResourceClass::Sampled) images += bindings.descriptor_counts[index];
+		}
+		total_images += images;
+		if (images > limits.maxPerStageDescriptorSampledImages || total_images > limits.maxDescriptorSetSampledImages ||
+		    total_images > DescriptorHeap::MaxSampledImages || resources > limits.maxPerStageResources) {
+			Common::HackNotice::Report("pipeline exceeds image or stage resource budget", "PipelineCache",
+			                           stage->info.shader_hash, total_images);
+			return false;
+		}
+	}
+	return true;
 }
 
 void PipelineCache::ClaimPipeline(const GraphicsPipelineKey& key) {
@@ -3744,11 +3796,8 @@ void PipelineCache::RunTableJob(CompileJob& job, InputInfo& input_info) {
 			return;
 		}
 		auto translated = ShaderRecompiler::TranslateProgram(source.decoded, options);
-		auto built      = BuildModule(job.key, options, std::move(translated), *job.specialization, {},
-		                              job.push_data_cursor, spirv, plain_spirv, &refusal);
-		if (built.module != nullptr) {
-			module = std::move(built);
-		}
+		module = BuildModule(job.key, options, std::move(translated), *job.specialization, {},
+		                     job.push_data_cursor, spirv, plain_spirv, &refusal);
 	}();
 	LockPrograms();
 	job.table->module  = std::move(module);
@@ -4101,6 +4150,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 			stages[3] = stages[3]->plain.get();
 		}
 	}
+	if (!SampledDescriptorBudgetFits(stages)) return nullptr;
 	const bool mesh        = stages[0]->info.stage == ShaderType::Mesh;
 	const auto color_count = targets.color_count;
 
@@ -4647,7 +4697,7 @@ void PipelineCache::PrepareGraphicsLibraries(const HW::Context& context, const H
 	if (stages[3] != nullptr && stages[3]->plain != nullptr && RecordsNoMipStats(state.ps_input_info.stage)) {
 		stages[3] = stages[3]->plain.get();
 	}
-	if (!PipelineLibraries::Eligible(stages)) {
+	if (!PipelineLibraries::Eligible(stages) || !SampledDescriptorBudgetFits(stages)) {
 		return;
 	}
 	GraphicsPipelineKey key {};

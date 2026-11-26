@@ -228,6 +228,7 @@ struct ImageResource {
 	bool                          sample_access_only     = true;
 	bool                          depth_compare     = false;
 	bool                          skip_degamma      = false;
+	uint32_t                      paired_view       = NoIndirectImage;
 	bool                          cube              = false;
 	bool                          r128              = false;
 	bool                          heap              = false;
@@ -268,9 +269,13 @@ struct SamplerResource {
 	static constexpr uint32_t RuntimeMipClasses     = 3u;
 	static constexpr uint32_t RuntimePlainKeys =
 	    RuntimeAddressClasses * RuntimeAddressClasses * RuntimeFilterClasses * RuntimeMipClasses;
-	static constexpr uint32_t RuntimeUnnormalizedKeys = 2u;
-	static constexpr uint32_t RuntimeCompareKeys      = 8u * 2u * RuntimeAddressClasses;
-	static constexpr uint32_t RuntimeKeys = RuntimePlainKeys + RuntimeUnnormalizedKeys + RuntimeCompareKeys;
+	static constexpr uint32_t RuntimeCompareKeys =
+	    8u * 2u * RuntimeAddressClasses * RuntimeAddressClasses * RuntimeMipClasses;
+	static constexpr uint32_t RuntimeIntegerKeys = RuntimeAddressClasses * RuntimeAddressClasses * 2u;
+	static constexpr uint32_t RuntimeClampEdgeXY = 2u * RuntimeAddressClasses + 2u;
+	static constexpr uint32_t RuntimeKeyCount(bool compare, bool integer) {
+		return compare ? RuntimeCompareKeys : integer ? RuntimeIntegerKeys : RuntimePlainKeys;
+	}
 	static constexpr uint32_t RuntimeAddressClassTable = 0x7764u;
 
 	uint32_t source                = 0;
@@ -285,6 +290,7 @@ struct SamplerResource {
 	bool     integer_border        = false;
 	bool     gather_lod            = false;
 	bool     runtime_descriptor    = false;
+	uint32_t runtime_key           = 0;
 
 	bool operator==(const SamplerResource& other) const = default;
 };
@@ -599,7 +605,7 @@ DescriptorBindingForImage(const ImageResource& image) {
 		}
 		const auto kind = *DescriptorBindingForImage(image);
 		for (size_t j = 0; j < i && bases[i] == UINT32_MAX; j++) {
-			if (bases[j] != UINT32_MAX && images[j].table == image.table &&
+			if (bases[j] != UINT32_MAX && images[j].table == image.table && images[j].skip_degamma == image.skip_degamma &&
 			    DescriptorBindingForImage(images[j]) == kind) {
 				if (images[j].table_capacity != image.table_capacity) {
 					EXIT("shader binding layout failed: image table %u has two capacities",

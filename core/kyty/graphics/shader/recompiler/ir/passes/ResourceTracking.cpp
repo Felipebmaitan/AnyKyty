@@ -717,6 +717,15 @@ public:
 				for (const auto& use: uses) use.user->SetArg(use.operand, key);
 			}
 		}
+		for (const auto& [use, resource]: m_view_uses) {
+			const auto* handle = use->Arg(0).ResolveInstruction();
+			auto* block = use->Parent();
+			const auto where = std::ranges::find_if(block->Instructions(), [&](const auto& inst) { return &inst == use; });
+			const auto view = block->PrependNewInst(where, ValueOpcode::GetImageResource,
+			    {handle->Arg(0), handle->Arg(1), handle->Arg(2), handle->Arg(3),
+			     handle->Arg(4), handle->Arg(5), handle->Arg(6), handle->Arg(7)}, resource);
+			use->SetArg(0, Value(&*view));
+		}
 		m_program.descriptor_sources         = std::move(m_sources);
 		m_program.info                       = std::move(m_info);
 		m_program.resource_tracking_complete = true;
@@ -5392,7 +5401,8 @@ private:
 		                           memory.kind == ResourceKind::ScalarBuffer;
 	}
 
-	uint32_t AddImage(uint32_t source, const MemoryInfo& memory, ValueOpcode op, uint32_t pc) {
+	uint32_t AddImage(uint32_t source, const MemoryInfo& memory, ValueOpcode op, uint32_t pc,
+	                  bool paired, bool raw = false) {
 		const auto resource_class = ImageOpcodeInfoOf(op).resource_class;
 		const bool atomic64 = ImageOpcodeInfoOf(op).access == ImageAccess::Atomic &&
 		                      memory.data_bits == 64u;
@@ -5407,7 +5417,8 @@ private:
 			if (image.source == source && image.resource_class == resource_class &&
 			    image.dimension == memory.image_dimension && image.mip_mode == mip &&
 			    image.depth_compare == depth && image.r128 == memory.image_r128 &&
-			    image.atomic64 == atomic64) {
+			    image.atomic64 == atomic64 && paired == (image.paired_view != ImageResource::NoIndirectImage) &&
+			    image.skip_degamma == raw) {
 				image.cube |= memory.image_cube;
 				Merge(image, op, pc);
 				return i;
@@ -5426,6 +5437,7 @@ private:
 		image.r128           = memory.image_r128;
 		image.cube           = memory.image_cube;
 		image.atomic64       = atomic64;
+		image.skip_degamma   = raw;
 		Merge(image, op, pc);
 		m_info.images.push_back(image);
 		return static_cast<uint32_t>(m_info.images.size() - 1);
@@ -5484,10 +5496,17 @@ private:
 		m_info.sampled_pairs.push_back({image, sampler, pc});
 	}
 
-	void AddHandlePatch(Inst* handle, uint32_t resource, uint32_t pc) {
+	void AddHandlePatch(Inst* handle, uint32_t resource, uint32_t pc, Inst* image_use = nullptr) {
 		for (const auto& patch: m_handle_patches) {
 			if (patch.handle == handle) {
 				if (patch.resource != resource) {
+					if (image_use != nullptr &&
+					    m_info.images[resource].source == m_info.images[patch.resource].source &&
+					    (m_info.images[resource].paired_view != ImageResource::NoIndirectImage ||
+					     m_info.images[patch.resource].paired_view != ImageResource::NoIndirectImage)) {
+						m_view_uses.emplace_back(image_use, resource);
+						return;
+					}
 					Fail(pc, fmt::format("{} is reused with incompatible resource classes",
 					                     ValueOpcodeName(handle->GetOpcode())));
 				}
@@ -5677,12 +5696,8 @@ private:
 			GetHandle(inst.Arg(0), ValueOpcode::GetImageResource, 8, flags.pc,
 			          memory.resource * 4u, handle, source);
 		}
-		resource = AddImage(source, memory, op, flags.pc);
-		if (resource == UINT32_MAX) {
-			Fail(flags.pc, "image resource limit exceeded");
-		}
-		AddHandlePatch(handle, resource, flags.pc);
 		uint32_t sampler = 0;
+		bool paired = false;
 		if (image_info.needs_sampler) {
 			if (inst.NumArgs() < 2) {
 				Fail(flags.pc, "sampled image operation has no sampler handle");
@@ -5716,8 +5731,20 @@ private:
 			    op == ValueOpcode::ImageGatherRaw &&
 			    (memory.image_sample_flags & Decoder::ImageSampleFlagLod) != 0u;
 			AddHandlePatch(sampler_handle, sampler, flags.pc);
-			AddSampledPair(resource, sampler, flags.pc);
+			paired = runtime_sampler && (op == ValueOpcode::ImageSampleRaw || op == ValueOpcode::ImageGatherRaw) &&
+			         (memory.image_sample_flags & Decoder::ImageSampleFlagCompare) == 0u;
 		}
+		resource = AddImage(source, memory, op, flags.pc, paired);
+		if (resource == UINT32_MAX) Fail(flags.pc, "image resource limit exceeded");
+		if (paired) {
+			const auto raw = AddImage(source, memory, op, flags.pc, paired, true);
+			if (raw == UINT32_MAX) Fail(flags.pc, "image view limit exceeded");
+			m_info.images[resource].paired_view = raw;
+			m_info.images[raw].paired_view = resource;
+			AddSampledPair(raw, sampler, flags.pc);
+		}
+		AddHandlePatch(handle, resource, flags.pc, &inst);
+		if (image_info.needs_sampler) AddSampledPair(resource, sampler, flags.pc);
 		AddMemoryPatch(flags.index, resource, sampler, image_info.needs_sampler, flags.pc);
 	}
 
@@ -5740,6 +5767,7 @@ private:
 	ShaderInfo                                 m_info;
 	std::vector<DescriptorSource>              m_sources;
 	std::vector<HandlePatch>                   m_handle_patches;
+	std::vector<std::pair<Inst*, uint32_t>>     m_view_uses;
 	std::vector<MemoryPatch>                   m_memory_patches;
 	std::vector<IndirectDescriptorPlan>             m_indirect_descriptors;
 	std::map<const Inst*, Value>              m_descriptor_values;

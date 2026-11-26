@@ -43,6 +43,8 @@ struct ManifestModule {
 	uint64_t back_hash        = 0;
 	uint32_t user_data_count  = 0;
 	uint32_t push_data_cursor = 0;
+	bool runtime_buffers      = false;
+	bool runtime_samplers     = false;
 	std::variant<ShaderVertexInputInfo, ShaderPixelInputInfo, ShaderComputeInputInfo> input;
 	ShaderRecompiler::IR::ResourceSpecialization specialization;
 	bool from_assets = false;

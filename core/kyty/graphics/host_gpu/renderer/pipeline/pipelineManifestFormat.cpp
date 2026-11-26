@@ -761,6 +761,8 @@ std::string ModuleText(ManifestModule& module) {
 	if (module.back_hash != 0) w.Value("back", fmt::format("{:016x}", module.back_hash));
 	w.Dec("ud", module.user_data_count, 0u);
 	w.Dec("cur", module.push_data_cursor, 0u);
+	w.Flag("rb", module.runtime_buffers);
+	w.Flag("rs", module.runtime_samplers);
 	if (auto* vertex = std::get_if<ShaderVertexInputInfo>(&module.input)) {
 		VisitVertexInput(w, *vertex, std::get<ShaderVertexInputInfo>(base.input));
 	} else if (auto* pixel = std::get_if<ShaderPixelInputInfo>(&module.input)) {
@@ -790,6 +792,8 @@ bool ReadModule(std::span<const std::string_view> tokens, ManifestModule& module
 	if (const auto back = r.Find("back")) r.ok = r.ok && ParseNumber(*back, module.back_hash, 16);
 	r.Dec("ud", module.user_data_count, 0u);
 	r.Dec("cur", module.push_data_cursor, 0u);
+	r.Flag("rb", module.runtime_buffers);
+	r.Flag("rs", module.runtime_samplers);
 	if (auto* vertex = std::get_if<ShaderVertexInputInfo>(&module.input)) {
 		VisitVertexInput(r, *vertex, *vertex);
 	} else if (auto* pixel = std::get_if<ShaderPixelInputInfo>(&module.input)) {
@@ -1199,6 +1203,8 @@ uint64_t ManifestModuleIdentity(const ManifestModule&     module,
 	auto   stage = static_cast<uint8_t>(module.stage);
 	IoAll(writer, stage, module.code_hash, module.back_hash, module.user_data_count,
 	      module.push_data_cursor, module.specialization);
+	auto modes = static_cast<uint8_t>(uint32_t(module.runtime_samplers) | (uint32_t(module.runtime_buffers) << 1u));
+	if (modes != 0) Io(writer, modes);
 	writer.Raw(static_state.data(), static_state.size_bytes());
 	return XXH3_64bits(writer.bytes.data(), writer.bytes.size());
 }

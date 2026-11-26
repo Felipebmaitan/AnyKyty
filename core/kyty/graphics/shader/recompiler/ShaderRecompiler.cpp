@@ -827,7 +827,8 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	const auto emit_begin = std::chrono::steady_clock::now();
 	auto& ir = translated.program;
 	const auto* stage = StageName(ir.stage);
-	IR::ApplyResourceSpecialization(ir, specialization);
+	const auto sampler_count = IR::ApplyResourceSpecialization(ir, specialization, options.sampler_limit);
+	if (sampler_count > options.sampler_limit) return {.required_samplers = sampler_count};
 	if (options.table_mode) {
 		CompileResult refused;
 		if (!IR::EnterTableMode(ir, refused.table_refusal)) {

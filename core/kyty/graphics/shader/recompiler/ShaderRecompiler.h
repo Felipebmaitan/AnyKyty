@@ -39,6 +39,7 @@ struct CompileOptions {
 	bool                        wave_lane_pairs            = false;
 	bool                        runtime_buffer_descriptors = false;
 	bool                        runtime_sampler_descriptors = false;
+	uint32_t                    sampler_limit              = UINT32_MAX;
 };
 
 struct TranslateResult {
@@ -52,6 +53,7 @@ struct TranslateResult {
 struct CompileResult {
 	std::vector<uint32_t>  spirv;
 	std::string            table_refusal;
+	uint64_t               required_samplers = 0;
 	std::vector<uint32_t>  spirv_plain;
 	std::string            decoded_dump;
 	std::string            ir_dump;

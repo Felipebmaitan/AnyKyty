@@ -1399,6 +1399,8 @@ bool MaterializeImageTable(const ResourcePlan& program,
 
 bool SamplerSkipsDegamma(const ResourcePlan& program, const ResourceSnapshot& snapshot,
                          uint32_t image_index) {
+	const auto& image = program.info.images[image_index];
+	if (image.paired_view != ImageResource::NoIndirectImage) return image.skip_degamma;
 	return std::ranges::any_of(program.info.sampled_pairs, [&](const auto& pair) {
 		return pair.image == image_index && pair.sampler < snapshot.samplers.size() &&
 		       (snapshot.samplers[pair.sampler].dwords[0] >> 31u) != 0u;
@@ -1615,7 +1617,8 @@ static bool BuildResourceSpecialization(const ResourcePlan& program, ResourceSna
 		const bool  table_heap  = image.heap && base_source != nullptr &&
 		                         base_source->indirect_descriptor.has_value() &&
 		                         base_source->indirect_descriptor->table_array;
-		image.skip_degamma = !table_heap && Prospero::IsSrgbFormat(format) &&
+		image.skip_degamma = ((base.paired_view != ImageResource::NoIndirectImage && image.table_capacity != 0u) ||
+		                      (!table_heap && Prospero::IsSrgbFormat(format))) &&
 		                     SamplerSkipsDegamma(program, snapshot, base_index);
 		if (!storage && !base.depth_compare && !image.skip_degamma &&
 		    image.indirect_root == ImageResource::NoIndirectImage &&
@@ -2485,50 +2488,37 @@ bool HasIndirectBuffers(const ResourcePlan& program) {
 	});
 }
 
-static DescriptorValue RuntimeSamplerCandidate(uint32_t key) {
+DescriptorValue RuntimeSamplerCandidate(const SamplerResource& sampler) {
 	constexpr std::array<uint32_t, SamplerResource::RuntimeAddressClasses> clamps {0u, 1u, 2u, 6u};
-	uint32_t address_x = 2u, address_y = 2u, filter = 0u, mip = 0u, compare = 0u;
-	bool     unnormalized = false;
-	if (key < SamplerResource::RuntimePlainKeys) {
-		mip       = key % SamplerResource::RuntimeMipClasses;
-		filter    = key / SamplerResource::RuntimeMipClasses % SamplerResource::RuntimeFilterClasses;
-		address_y = key / (SamplerResource::RuntimeMipClasses * SamplerResource::RuntimeFilterClasses) %
-		            SamplerResource::RuntimeAddressClasses;
-		address_x = key / (SamplerResource::RuntimeMipClasses * SamplerResource::RuntimeFilterClasses *
-		                   SamplerResource::RuntimeAddressClasses);
-	} else if (key < SamplerResource::RuntimePlainKeys + SamplerResource::RuntimeUnnormalizedKeys) {
-		unnormalized = true;
-		filter       = (key - SamplerResource::RuntimePlainKeys) != 0u ? 3u : 0u;
-	} else {
-		const auto index = key - SamplerResource::RuntimePlainKeys - SamplerResource::RuntimeUnnormalizedKeys;
-		address_x = address_y = index % SamplerResource::RuntimeAddressClasses;
-		filter    = (index / SamplerResource::RuntimeAddressClasses) % 2u != 0u ? 3u : 0u;
-		compare   = index / (SamplerResource::RuntimeAddressClasses * 2u);
+	auto key = sampler.runtime_key;
+	const bool integer = sampler.integer_border;
+	const bool compare = sampler.depth_compare;
+	const auto mip_classes = integer ? 2u : SamplerResource::RuntimeMipClasses;
+	const auto mip = key % mip_classes;
+	key /= mip_classes;
+	uint32_t mag = 0, min = 0, function = 0;
+	bool aniso = false;
+	if (!integer && !compare) {
+		const auto filter = key % SamplerResource::RuntimeFilterClasses;
+		key /= SamplerResource::RuntimeFilterClasses;
+		aniso = filter == 4u;
+		mag = aniso ? 3u : filter >> 1u;
+		min = aniso ? 3u : filter & 1u;
 	}
-	const bool aniso      = filter == 4u;
-	const auto mag_filter = aniso ? 3u : filter >> 1u;
-	const auto min_filter = aniso ? 3u : filter & 1u;
+	const auto y = key % clamps.size();
+	key /= clamps.size();
+	const auto x = key % clamps.size();
+	if (compare) {
+		key /= clamps.size();
+		mag = min = key & 1u;
+		function = key >> 1u;
+	}
 	DescriptorValue value {.dword_count = 4u};
-	value.dwords[0] = clamps[address_x] | (clamps[address_y] << 3u) | (clamps[address_y] << 6u) |
-	                  (aniso ? 4u << 9u : 0u) | (compare << 12u) | (unnormalized ? 1u << 15u : 0u);
+	value.dwords[0] = clamps[x] | (clamps[y] << 3u) | (clamps[y] << 6u) |
+	                  (aniso ? 4u << 9u : 0u) | (function << 12u);
 	value.dwords[1] = 0xfffu << 12u;
-	value.dwords[2] = (mag_filter << 20u) | (min_filter << 22u) | (mip << 26u);
-	value.dwords[3] = 0u;
+	value.dwords[2] = (mag << 20u) | (min << 22u) | (mip << 26u);
 	return value;
-}
-
-static void MaterializeRuntimeSampler(uint32_t resource, ResourceSnapshot& snapshot,
-                               ResourceSpecialization& specialization) {
-	snapshot.samplers[resource] = RuntimeSamplerCandidate(3u * SamplerResource::RuntimeMipClasses + 2u);
-	auto& root = specialization.samplers[resource];
-	root.indirect_root              = resource;
-	root.indirect_mapping_offset    = 0u;
-	root.indirect_search_iterations = 0u;
-	auto child = root;
-	for (uint32_t key = 0; key < SamplerResource::RuntimeKeys; ++key) {
-		snapshot.samplers.push_back(RuntimeSamplerCandidate(key));
-		specialization.samplers.push_back(child);
-	}
 }
 
 thread_local bool t_indirect_sampler_failure = false;
@@ -2726,6 +2716,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 #endif
 	for (uint32_t i = 0; i < program.info.images.size(); ++i) {
 		const auto& image = program.info.images[i];
+		const auto active_view = image.skip_degamma && image.paired_view != ImageResource::NoIndirectImage
+		                             ? image.paired_view : i;
 		specialization.images[i] = {
 		    .numeric_class = image.numeric_class,
 		    .dimension = image.dimension,
@@ -2747,7 +2739,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 		if (source->indirect_descriptor.has_value()) {
 			snapshot.images[i] = {.dword_count = 8u};
-			if (!WalkedActive(program, image.source) || !WalkedImageActive(program, i)) {
+			if (!WalkedActive(program, image.source) || !WalkedImageActive(program, active_view)) {
 				continue;
 			}
 			const auto& indirect = *source->indirect_descriptor;
@@ -2781,7 +2773,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 			if (!evaluate(image.source, snapshot.images[i])) {
 				return false;
 			}
-			if (!WalkedImageActive(program, i) ||
+			if (!WalkedImageActive(program, active_view) ||
 			    !ValidImageDescriptor(snapshot.images[i], image.r128)) {
 				snapshot.images[i].dwords.fill(0);
 			}
@@ -2794,7 +2786,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		    i < program.info.samplers.size() ? i : specialization.samplers[i].indirect_root;
 		if (base_index >= program.info.samplers.size()) return false;
 		if (i < program.info.samplers.size() && program.info.samplers[i].runtime_descriptor) {
-			MaterializeRuntimeSampler(i, snapshot, specialization);
+			snapshot.samplers[i] = {.dword_count = 4u};
 			continue;
 		}
 		if (i < program.info.samplers.size()) {
@@ -2989,6 +2981,7 @@ ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind) {
 	resource.dimension              = root.dimension;
 	resource.unfiltered_access_only = root.unfiltered_access_only;
 	resource.depth_compare          = root.depth_compare;
+	resource.skip_degamma           = root.skip_degamma;
 	resource.r128                   = root.r128;
 	if (kind != 0u) {
 		resource.numeric_class = static_cast<Prospero::TextureNumericClass>((kind - 1u) / 2u);
@@ -3020,7 +3013,7 @@ bool ResourceSpecializationFits(const Program& program, const ResourceSpecializa
 	            SamplerResource::NoIndirectSampler);
 }
 
-void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
+uint64_t ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization, uint32_t sampler_limit) {
 	EXIT_IF(!program.resource_tracking_complete || program.shader_info_complete);
 	EXIT_IF(program.info.buffers.size() > specialization.buffers.size() ||
 	        program.info.images.size() > specialization.images.size() ||
@@ -3128,6 +3121,25 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		for (auto& candidate: samplers[index].indirect_resources) {
 			candidate = sampler_plan.mapping[candidate][static_cast<uint32_t>(binding.type)];
 			EXIT_IF(candidate == UINT32_MAX);
+		}
+	}
+	uint64_t sampler_count = samplers.size();
+	for (const auto& sampler: samplers) {
+		if (sampler.runtime_descriptor)
+			sampler_count += SamplerResource::RuntimeKeyCount(sampler.depth_compare, sampler.integer_border) - 1u;
+	}
+	if (sampler_count > sampler_limit) return sampler_count;
+	samplers.reserve(sampler_count);
+	for (uint32_t i = 0; i < sampler_plan.bindings.size(); ++i) {
+		if (!samplers[i].runtime_descriptor) continue;
+		auto child = samplers[i];
+		auto& candidates = samplers[i].indirect_resources;
+		candidates = {i};
+		const auto count = SamplerResource::RuntimeKeyCount(child.depth_compare, child.integer_border);
+		for (uint32_t key = 1; key < count; ++key) {
+			child.runtime_key = key;
+			candidates.push_back(static_cast<uint32_t>(samplers.size()));
+			samplers.push_back(child);
 		}
 	}
 	for (auto& pair: sampled_pairs) {
@@ -3257,6 +3269,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		pair.image = image_remap[pair.image];
 	}
 	for (auto& image: images) {
+		if (image.paired_view != ImageResource::NoIndirectImage) image.paired_view = image_remap[image.paired_view];
 		if (image.indirect_root != ImageResource::NoIndirectImage) {
 			image.indirect_root = image_remap[image.indirect_root];
 		}
@@ -3265,6 +3278,7 @@ void ApplyResourceSpecialization(Program& program, const ResourceSpecialization&
 		}
 	}
 	image_remap.Apply(images);
+	return sampler_count;
 }
 
 bool LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan) {

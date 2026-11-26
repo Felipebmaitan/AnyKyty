@@ -250,7 +250,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 				}
 				stages[i] = found->second;
 			}
-			CreatePipelineInternal(m_graphics, node.second, node.first, stages, cache);
+			if (SampledDescriptorBudgetFits(stages)) CreatePipelineInternal(m_graphics, node.second, node.first, stages, cache);
 		});
 	}
 	for (const auto* module: modules | std::views::values) {
@@ -354,6 +354,8 @@ bool PipelineCache::ReadRecord(std::span<const uint8_t> frame_bytes, StoreRecord
 			if (!complete()) {
 				return false;
 			}
+			const std::array<const ShaderModule*, 1> stages {&module};
+			if (!SampledDescriptorBudgetFits(stages)) return false;
 			record.plan_loaded = ShaderRecompiler::IR::LoadResourcePlan(plan, record.plan);
 			module.module      = CompileSPV(spirv, m_graphics.device);
 			module.spirv_words = static_cast<uint32_t>(spirv.size());
@@ -469,6 +471,7 @@ bool PipelineCache::CreateGraphicsPipeline(Pipeline& pipeline, const GraphicsPip
 		}
 		stages[i] = found->second;
 	}
+	if (!SampledDescriptorBudgetFits(stages)) return false;
 	CreatePipelineInternal(m_graphics, pipeline, key, stages, m_driver_cache);
 	return true;
 }
