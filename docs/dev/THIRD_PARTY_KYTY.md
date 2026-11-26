@@ -312,7 +312,7 @@ tools/precache/precache --binary "$build/precache-tool/kyty_precache" inventory 
 The output directory contains the local shader store, creation records, compute recipes, packaged Kyty manifests and a report of unsupported input formats. For a manually verified binding map, pass `--bindings IMAGE MAP`.
 Pass `--graphics-bundle ASSET` to also write `graphics-passes.json` from a supported local effect bundle and the supplied relinked images.
 
-The headless driver tool limits simultaneous Vulkan compute requests with `precache driver --jobs N`. Its manifest queue can use up to two additional workers, capped at six total. With the default four driver slots, the two additional workers handle smaller manifest jobs. The `compute_lookup` and `compute_create` timing rows show accumulated time waiting for a driver slot and time inside Vulkan. Create calls can reuse driver-internal data.
+The headless driver tool limits simultaneous Vulkan compute requests with `precache driver --jobs N`. It accepts one to six driver slots and reserves two extra manifest workers for smaller jobs. The `compute_lookup` and `compute_create` timing rows show accumulated time waiting for a driver slot and time inside Vulkan. The `compute_driver_peak` line reports peak simultaneous Vulkan compute calls. Create calls can reuse driver-internal data.
 
 Set `KYTY_COMPUTE_DISPATCH_ORIGINS=1` during a compile audit to associate a queued or synchronous compute pipeline request with a command packet. The diagnostic records a matching native emitter return address when the title used an AGC dispatch export. An address of zero means the emitter was unobserved. The trace is logged once per pipeline variant. Caller addresses are available with the combined backend.
 

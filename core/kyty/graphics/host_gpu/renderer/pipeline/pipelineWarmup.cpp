@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
+#include "graphics/host_gpu/renderer/renderDraw.h"
 
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
@@ -16,8 +17,6 @@
 #include <string_view>
 
 namespace Libs::Graphics {
-
-uint32_t TableXprMode();
 
 #if defined(ANYPS5_KYTY)
 namespace {

@@ -2258,10 +2258,11 @@ void TableLoadSwitches() {
 	}();
 	(void)loaded;
 }
+}
+
 uint32_t TableXprMode() {
 	TableLoadSwitches();
 	return kyty_local_table_xpr_mode.load(std::memory_order_relaxed);
-}
 }
 
 namespace {

@@ -71,10 +71,6 @@
 
 namespace Libs::Graphics {
 
-namespace {
-uint32_t TableXprMode();
-}
-
 std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t index_offset,
 	                                           const ShaderVertexInputInfo& vs_input_info) {
 	auto     vertex_offset   = static_cast<int32_t>(index_offset);
