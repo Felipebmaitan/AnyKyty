@@ -4400,6 +4400,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 	std::optional<StallScope> stall;
 #if defined(ANYPS5_KYTY)
 	const uint64_t stall_hash = stages[3] != nullptr ? stages[3]->info.shader_hash : stages[0]->info.shader_hash;
+	std::optional<GuestClockHold> async_wait_hold;
 #endif
 	if (m_async_handoff) {
 #if defined(ANYPS5_KYTY)
@@ -4448,7 +4449,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 					const auto probe_started = std::chrono::steady_clock::now();
 					bool       made          = false;
 					{
-						const StallScope probe(*this, "graphics-probe", stall_hash, sync_why);
+						const StallScope probe(*this, "graphics-probe", stall_hash, sync_why, false);
 						made = CreateGraphicsPipelineNow(created, key, stages);
 					}
 					m_async_probes.fetch_add(1, std::memory_order_relaxed);
@@ -4482,6 +4483,9 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 #if defined(ANYPS5_KYTY)
 				wait_from  = std::chrono::steady_clock::now();
 				wait_until = skip_now ? wait_from : wait_from + PipelineWait;
+				if (!skip_now) {
+					async_wait_hold.emplace();
+				}
 #else
 				wait_until = std::chrono::steady_clock::now() + PipelineWait;
 #endif
