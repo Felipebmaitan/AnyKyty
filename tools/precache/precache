@@ -205,7 +205,7 @@ def driver(args, binary):
             env[key] = os.environ[key]
     if args.four_job_marker:
         env['KYTY_PRECACHE_FOUR_JOB_MARKER'] = str(args.four_job_marker.resolve())
-    workers = min(args.jobs + 2, 6)
+    workers = args.jobs + 2
     env.update(KYTY_PRECACHE_CPUS=str(2 * workers), KYTY_PRECACHE_DRIVER_JOBS=str(args.jobs),
                __GL_SHADER_DISK_CACHE_PATH=str(cache), MESA_SHADER_CACHE_DIR=str(cache), XDG_CACHE_HOME=str(cache))
     with args.gpu_lock.open('a') as lock, (root / 'driver.log').open('ab') as log:

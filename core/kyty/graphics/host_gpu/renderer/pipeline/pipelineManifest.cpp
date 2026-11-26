@@ -68,7 +68,6 @@ using ManifestText::ParseNumber;
 using ManifestText::Split;
 
 constexpr size_t LargeSpirvWords = 50'000;
-constexpr size_t LargeWorkers = 4;
 
 std::string SafeFileName(std::string name) {
 	for (auto& c: name) {
@@ -771,7 +770,9 @@ void PipelineCache::OpenManifest() {
 		state.ReleaseStartup(state.startup_total == state.startup_done ? result : "skipped");
 	}
 	for (size_t i = 0; i < workers; i++) {
-		state.threads.emplace_back([this, i](const std::stop_token& stop) { ManifestWorker(stop, i < LargeWorkers); });
+		state.threads.emplace_back([this, i](const std::stop_token& stop) {
+			ManifestWorker(stop, i < m_large_manifest_workers);
+		});
 	}
 	state.code_path   = folders.back() / (stem + ".code");
 	state.code_thread = std::jthread([this](const std::stop_token& stop) { CodeStoreThread(stop); });
@@ -2882,7 +2883,7 @@ void PipelineCache::ManifestWorker(const std::stop_token& stop, bool allow_large
 	KYTY_PROFILER_THREAD("Thread_PipelineManifest");
 	Common::Thread::LowerCurrentPriority();
 	auto& state = *m_manifest;
-	const bool prefer_large = allow_large && Common::ParallelThreads() > LargeWorkers;
+	const bool prefer_large = allow_large && Common::ParallelThreads() > m_large_manifest_workers;
 	for (;;) {
 		std::shared_ptr<const std::vector<uint32_t>> code;
 		std::shared_ptr<const std::vector<uint32_t>> back_code;

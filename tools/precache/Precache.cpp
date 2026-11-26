@@ -35,6 +35,7 @@ PFN_vkCreateComputePipelines g_create_compute_pipelines = nullptr;
 std::mutex g_jobs_mutex;
 std::condition_variable g_jobs_available;
 unsigned g_jobs_active = 0;
+unsigned g_jobs_peak = 0;
 unsigned g_jobs_limit = 4;
 uint64_t g_finished_pipelines = 0;
 const char* g_four_job_marker = nullptr;
@@ -68,7 +69,7 @@ DriverComputeTiming g_lookup_time;
 DriverComputeTiming g_create_time;
 
 unsigned DriverComputeLimit() {
-	const auto fallback = std::max(1u, std::thread::hardware_concurrency() / 2);
+	const auto fallback = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 4u);
 	const auto* value = std::getenv("KYTY_PRECACHE_DRIVER_JOBS");
 	return value == nullptr ? fallback : static_cast<unsigned>(std::clamp(std::atoi(value), 1, 6));
 }
@@ -84,6 +85,7 @@ VKAPI_ATTR VkResult VKAPI_CALL CreateComputePipelines(VkDevice device, VkPipelin
 			return g_jobs_active < g_jobs_limit;
 		});
 		++g_jobs_active;
+		g_jobs_peak = std::max(g_jobs_peak, g_jobs_active);
 	}
 	const auto admitted = std::chrono::steady_clock::now();
 	const auto result = g_create_compute_pipelines(device, cache, count, infos, allocator, pipelines);
@@ -132,7 +134,7 @@ bool SystemContentParamSfoGetString(const char* name, char* value, size_t value_
 unsigned int std::thread::hardware_concurrency() noexcept {
 	const char* value = std::getenv("KYTY_PRECACHE_CPUS");
 	const int   cpus  = value != nullptr ? std::atoi(value) : 6;
-	return static_cast<unsigned>(std::clamp(cpus, 1, 12));
+	return static_cast<unsigned>(std::clamp(cpus, 1, 16));
 }
 
 extern "C" void GuestThreadStackMappings_nid_no_patch(std::uintptr_t, std::uintptr_t, void (*)(void*, std::uintptr_t, std::uintptr_t),
@@ -285,7 +287,7 @@ int main(int argc, char** argv) {
 	bool completed = false;
 	const auto  start = std::chrono::steady_clock::now();
 	{
-		PipelineCache cache(graphics, &heap, ShaderStorePath(), argc != 6);
+		PipelineCache cache(graphics, &heap, ShaderStorePath(), argc != 6, g_jobs_limit);
 		std::fprintf(stderr, "kyty_precache: WarmUp done after %.1f s\n",
 		             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 		uint32_t idle = 0;
@@ -314,6 +316,7 @@ int main(int argc, char** argv) {
 	}
 	g_lookup_time.Report("lookup");
 	g_create_time.Report("create");
+	std::fprintf(stderr, "kyty_precache: compute_driver_peak=%u\n", g_jobs_peak);
 	std::fprintf(stderr, "kyty_precache: done\n");
 	std::fflush(stderr);
 	std::_Exit(completed ? 0 : 124);
