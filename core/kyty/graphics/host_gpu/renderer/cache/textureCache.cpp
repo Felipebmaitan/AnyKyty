@@ -239,7 +239,11 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 }
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
-	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
+	return InsertImage(info, false);
+}
+
+ImageId TextureCache::InsertImage(const ImageInfo& info, bool bindless) {
+	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info, bindless);
 	AttachImageVersion(id);
 	RegisterImage(id);
 	return id;
@@ -2652,7 +2656,7 @@ ImageId TextureCache::FindImageImpl(ImageDesc& desc, bool exact_format, bool spe
 			exact.valid        = true;
 		}
 		if (!result) {
-			result         = InsertImage(desc.info);
+			result         = InsertImage(desc.info, desc.heap);
 			auto& inserted = m_slot_images[result];
 			if (m_buffer_cache.HasGpuDirtyBytes(inserted.info.data.address,
 			                                    inserted.info.data.size)) {
@@ -2734,14 +2738,15 @@ ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool e
 	return selected;
 }
 
-vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
+vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc,
+                                       std::source_location caller) {
 	if (desc.type == BindingType::Storage) {
 		CollectHotPagesOf(id);
 	}
 	Common::ScopedLock lock {m_lock};
 	if (m_slot_images[id].is_depth_copy && desc.type == BindingType::Texture) {
 		RefreshDepthCopy(id);
-		return m_slot_images[id].FindView(desc.view_info);
+		return m_slot_images[id].FindView(desc.view_info, caller);
 	}
 	if (m_slot_images[id].is_stencil_copy &&
 	    (desc.type == BindingType::Texture || desc.type == BindingType::Storage)) {
@@ -2753,7 +2758,7 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 			}
 		}
 		RefreshStencilCopy(id);
-		return m_slot_images[id].FindView(desc.view_info);
+		return m_slot_images[id].FindView(desc.view_info, caller);
 	}
 	auto&            image = m_slot_images[id];
 	TouchImage(image);
@@ -2776,7 +2781,7 @@ vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 			break;
 		default: EXIT("TextureCache: invalid texture binding\n");
 	}
-	return image.FindView(desc.view_info);
+	return image.FindView(desc.view_info, caller);
 }
 
 vk::ImageView TextureCache::FindRenderTarget(ImageId id, const ImageDesc& desc) {

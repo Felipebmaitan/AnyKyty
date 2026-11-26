@@ -1048,7 +1048,9 @@ static TextureBinding DeclineTableView(TextureCache::ImageDesc& desc, vk::Format
 	    "RenderExecutor::ResolveTexture (incompatible image view)", 0, 0,
 	    fmt::format("texture 0x{:016x} image format {} view format {}", desc.info.data.address,
 	                static_cast<int>(image_format), static_cast<int>(view_format)));
-	return {ImageId {}, nullptr, std::move(desc)};
+	TextureBinding binding {ImageId {}, nullptr, std::move(desc)};
+	binding.declined = true;
+	return binding;
 }
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
@@ -1491,6 +1493,19 @@ static void CopyGpuFlatLoads(RenderContext& context, const vk::DescriptorBufferI
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands, {}, 1, &after, 0, nullptr, 0,
 	                       nullptr);
+}
+
+static bool TableTextureStale(const TextureBinding& texture, const Image* image) {
+	if (!texture.image_id) {
+		return false;
+	}
+	if (image == nullptr || (!image->registered && !image->info.data.Empty()) ||
+	    image->binding.needs_rebind) {
+		return true;
+	}
+	return !image->info.IsDepth() && !image->is_stencil_copy &&
+	       !image->info.data.Empty() &&
+	       !ImageViewOps::FormatsCompatible(image->backing.format, texture.desc.view_info.format);
 }
 
 static bool TableViewKeepable(const ImageLookupState& state, const Image& image) {
@@ -1972,13 +1987,8 @@ void RenderExecutor::RebindReusedTables(PreparedBindings& prepared) {
 	const auto& program       = prepared.runtime->module->info;
 	auto&       texture_cache = m_context.GetTextureCache();
 	const auto  tick          = texture_cache.m_gc_tick;
-	const auto  stale         = [&](const TextureBinding& binding) {
-        if (!binding.image_id) {
-            return false;
-        }
-        const auto* image = texture_cache.m_slot_images.try_get(binding.image_id);
-        return image == nullptr || (!image->registered && !image->info.data.Empty()) ||
-               image->binding.needs_rebind;
+	const auto stale = [&](const TextureBinding& binding) {
+		return TableTextureStale(binding, texture_cache.m_slot_images.try_get(binding.image_id));
 	};
 	const auto unchanged = [&](uint32_t index) {
 		const auto& element = state.elements[index];
@@ -2931,12 +2941,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	auto&       images        = prepared.images;
 	auto&       texture_cache = m_context.GetTextureCache();
 	const auto stale = [&](const TextureBinding& binding) {
-		if (!binding.image_id) {
-			return false;
-		}
-		const auto* image = texture_cache.m_slot_images.try_get(binding.image_id);
-		return image == nullptr || (!image->registered && !image->info.data.Empty()) ||
-		       image->binding.needs_rebind;
+		return TableTextureStale(binding, texture_cache.m_slot_images.try_get(binding.image_id));
 	};
 	std::vector<bool> stale_tables(prepared.table_images.size());
 	for (size_t k = 0; k < prepared.table_images.size(); k++) {

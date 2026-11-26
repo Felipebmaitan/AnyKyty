@@ -103,6 +103,25 @@ void BadFloatModes() {
 	}
 }
 
+void LargeImageSpecialization() {
+	PipelineManifest manifest;
+	ManifestModule module {.stage = ShaderType::Compute, .code_hash = 0x1212121212121212ull};
+	module.input.emplace<ShaderComputeInputInfo>();
+	module.specialization.images.resize(32770);
+	module.specialization.images.back().heap = true;
+	module.specialization.images.back().indirect_mapping_offset = 262238;
+	manifest.modules.push_back(std::move(module));
+
+	const auto bytes = SaveManifest(manifest);
+	PipelineManifest loaded;
+	uint32_t skipped = 0;
+	Check(LoadManifest(bytes, loaded, &skipped), "a long image specialization manifest loads");
+	Check(skipped == 0 && loaded.modules.size() == 1, "the long image specialization is accepted");
+	if (loaded.modules.size() == 1) {
+		Check(SaveManifest(loaded) == bytes, "image specialization order and fields round-trip");
+	}
+}
+
 void StageRegisters() {
 	HW::Shader shaders;
 	shaders.SetGsShaderResource1({.float_mode = 0xc0, .dx10_clamp = true});
@@ -126,6 +145,7 @@ int main() {
 	RoundTrip();
 	OlderManifest();
 	BadFloatModes();
+	LargeImageSpecialization();
 	StageRegisters();
 	if (g_failures != 0) {
 		std::printf("kyty_shim_manifest_float_modes: %d check(s) FAILED\n", g_failures);

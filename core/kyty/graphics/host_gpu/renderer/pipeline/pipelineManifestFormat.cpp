@@ -726,13 +726,17 @@ template <class Element>
 void ReadElements(TextReader& r, std::string_view key, std::vector<Element>& elements) {
 	const auto text = r.Find(key);
 	if (!text) return;
-	const auto parts = Split(*text, ',');
 #if defined(ANYPS5_KYTY)
-	r.ok             = r.ok && parts.size() <= 16384;
+	const size_t limit = key == "si" ? 65536 : 16384;
 #else
-	r.ok             = r.ok && parts.size() <= 4096;
+	constexpr size_t limit = 4096;
 #endif
-	elements.assign(r.ok ? parts.size() : 0, Element {});
+	if (!r.ok || std::ranges::count(*text, ',') >= static_cast<ptrdiff_t>(limit)) {
+		r.ok = false;
+		return;
+	}
+	const auto parts = Split(*text, ',');
+	elements.assign(parts.size(), Element {});
 	for (size_t i = 0; r.ok && i < parts.size(); i++) {
 		ElementReader reader(parts[i]);
 		VisitElement(reader, elements[i]);

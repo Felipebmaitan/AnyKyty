@@ -1,5 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
-#include "graphics/host_gpu/renderer/pipeline/pipelineStoreFormat.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
 
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -76,6 +76,73 @@ bool EncodeModuleRecord(ShaderType stage, uint64_t hash, uint32_t user_data_coun
 }
 
 #if defined(ANYPS5_KYTY)
+bool LinkedComputeStore::Read(std::istream& input, std::span<const uint8_t> header) {
+	using namespace ShaderStoreFormat;
+	using namespace ShaderRecompiler::IR;
+	const auto read = [&](void* data, size_t size) {
+		return bool(input.read(static_cast<char*>(data), static_cast<std::streamsize>(size)));
+	};
+	std::array<char, 8> magic {};
+	std::vector<uint8_t> profile(header.size());
+	uint32_t count = 0;
+	if (header.empty() || !read(magic.data(), magic.size()) || std::string_view(magic.data(), magic.size()) != "KYTYLCS1" ||
+	    !read(profile.data(), profile.size()) || !std::ranges::equal(profile, header) || !read(&count, sizeof(count))) return false;
+	decltype(m_entries) entries;
+	std::unordered_set<uint64_t> ids;
+	std::vector<uint8_t> compressed, raw;
+	size_t budget = 256u << 20;
+	for (uint32_t i = 0; i < count; ++i) {
+		Frame frame;
+		if (!read(&frame, sizeof(frame)) || !frame.raw_size || frame.raw_size > (64u << 20) ||
+		    frame.raw_size > budget || frame.compressed_size > ZSTD_compressBound(frame.raw_size)) return false;
+		compressed.resize(frame.compressed_size);
+		if (!read(compressed.data(), compressed.size()) || !DecodeShaderStoreFrame(frame, compressed, raw)) return false;
+		Reader reader {.bytes = raw, .allocation_budget = std::min<size_t>(64u << 20, budget)};
+		const auto initial_budget = reader.allocation_budget;
+		Entry entry;
+		auto& key = entry.key;
+		auto& module = entry.module;
+		std::vector<uint8_t> plan;
+		std::vector<uint32_t> plain;
+		IoAll(reader, entry.caller, module.function_code);
+		IoStoreModule(reader, key, module, plan, entry.spirv, plain);
+		if (!reader.ok || !reader.bytes.empty() || !plain.empty() || plan.empty() ||
+		    entry.caller.empty() || module.function_code.empty() || key.stage != ShaderType::Compute ||
+		    module.info.stage != key.stage || module.info.shader_hash != key.hash || module.info.table_mode ||
+		    module.mesh_task || !module.vertex_formats.empty() || !module.rect_parameters.empty() ||
+		    entry.spirv.size() < 5 || entry.spirv.front() != 0x07230203u ||
+		    XXH3_64bits(entry.caller.data(), entry.caller.size() * sizeof(uint32_t)) != key.hash) return false;
+		Writer inputs;
+		IoAll(inputs, key.stage, key.hash, key.user_data_count, key.static_state,
+		      module.info.bindings.push_data_start_dword, module.specialization);
+		inputs.Raw(module.function_code.data(), module.function_code.size() * sizeof(uint32_t));
+		if (inputs.failure.Failed() || XXH3_64bits(inputs.bytes.data(), inputs.bytes.size()) != module.id ||
+		    !ids.insert(module.id).second) return false;
+		budget -= std::max<size_t>(frame.raw_size, initial_budget - reader.allocation_budget);
+		module.spirv_words = static_cast<uint32_t>(entry.spirv.size());
+		entries.emplace(key.hash, std::move(entry));
+	}
+	if (input.peek() != std::char_traits<char>::eof() || input.bad()) return false;
+	m_entries.swap(entries);
+	return true;
+}
+
+const LinkedComputeStore::Entry* LinkedComputeStore::Find(
+    uint64_t hash, uint32_t user_data_count, std::span<const uint32_t> static_state,
+    std::span<const uint32_t> caller, std::span<const uint32_t> functions,
+    const ShaderRecompiler::IR::ResourceSpecialization& specialization, uint32_t cursor) const {
+	const auto [first, last] = m_entries.equal_range(hash);
+	for (auto it = first; it != last; ++it) {
+		const auto& entry = it->second;
+		const auto& layout = entry.module.info.bindings;
+		if (entry.key.user_data_count == user_data_count && std::ranges::equal(entry.key.static_state, static_state) &&
+		    std::ranges::equal(entry.caller, caller) && std::ranges::equal(entry.module.function_code, functions) &&
+		    entry.module.specialization == specialization &&
+		    layout.push_data_start_dword == ShaderRecompiler::IR::PushData::StartFor(cursor, layout.ShaderDataDwords())) return &entry;
+	}
+	return nullptr;
+}
+
 bool LoadStoredComputeModule(std::istream& input, std::span<const uint8_t> expected_header,
                              uint64_t id, ShaderModule& module, std::vector<uint32_t>& spirv,
                              std::string& error) {

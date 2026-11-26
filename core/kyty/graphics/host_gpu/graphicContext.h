@@ -28,6 +28,7 @@ struct GraphicContext {
 	vk::PhysicalDeviceMemoryProperties physical_device_memory_properties     = {};
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
+	VmaAllocator                       spill_allocator                       = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               host_import_enabled                   = false;
 	uint64_t                           host_import_alignment                 = 0;
@@ -57,6 +58,8 @@ struct GraphicContext {
 #endif
 	bool                                      mesh_shader_enabled                   = false;
 	bool                                      shader_float16_enabled                = false;
+	vk::ShaderStageFlags                      subgroup_supported_stages             = {};
+	vk::SubgroupFeatureFlags                  subgroup_supported_operations         = {};
 	bool                                      native_ray_tracing_enabled            = false;
 	vk::PhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties                = {};
 	uint32_t                           subgroup_size                         = 0;
@@ -135,6 +138,8 @@ struct GraphicContext {
 	};
 	[[nodiscard]] uint32_t GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> heaps) const;
 	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
+	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image,
+	                                   bool bindless);
 	void                   DeleteImage(VulkanImage& image);
 
 	uint32_t screen_width  = 0;
@@ -173,6 +178,7 @@ struct VulkanImage {
 	std::vector<VulkanImageState> subresource_states;
 	VmaAllocation                allocation = nullptr;
 	bool recyclable = false;
+	bool spilled    = false;
 };
 
 

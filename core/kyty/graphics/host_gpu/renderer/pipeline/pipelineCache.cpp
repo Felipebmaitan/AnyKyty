@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #if defined(ANYPS5_KYTY)
+#include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #endif
 
@@ -27,6 +29,7 @@
 #if defined(ANYPS5_KYTY)
 #include "graphics/host_gpu/renderer/pipeline/programLock.h"
 #endif
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
@@ -626,9 +629,21 @@ bool F32ProductNoContractionEnabled() {
 	}();
 	return enabled;
 }
+
+uint32_t SubgroupStages(vk::ShaderStageFlags supported) {
+	uint32_t stages = 0;
+	for (const auto stage: {ShaderType::Vertex, ShaderType::Pixel, ShaderType::Compute, ShaderType::Mesh,
+	                        ShaderType::Local, ShaderType::TessellationControl, ShaderType::TessellationEvaluation}) {
+		if (supported & NativeShaderStage(stage)) {
+			stages |= 1u << static_cast<uint32_t>(stage);
+		}
+	}
+	return stages;
+}
 }
 
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
+	const auto operations = graphics.subgroup_supported_operations;
 	return {.maintenance8           = graphics.maintenance8_enabled,
 	        .native_float_min_max   = graphics.physical_device_properties.vendorID == 0x1002u,
 	        .device_clock_period_ps = graphics.device_clock_period_ps,
@@ -639,7 +654,12 @@ ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	        .ray_query              = graphics.ray_query_enabled,
 	        .lds_lane_sync          = LdsLaneSyncEnabled(),
 	        .native_float16         = graphics.shader_float16_enabled,
-	        .f32_product_no_contraction = F32ProductNoContractionEnabled()};
+	        .f32_product_no_contraction = F32ProductNoContractionEnabled(),
+	        .subgroup_arithmetic = bool(operations & vk::SubgroupFeatureFlagBits::eArithmetic),
+	        .subgroup_ballot     = bool(operations & vk::SubgroupFeatureFlagBits::eBallot),
+	        .subgroup_shuffle    = bool(operations & vk::SubgroupFeatureFlagBits::eShuffle),
+	        .subgroup_quad       = bool(operations & vk::SubgroupFeatureFlagBits::eQuad),
+	        .subgroup_stages     = SubgroupStages(graphics.subgroup_supported_stages)};
 }
 
 std::filesystem::path ShaderStorePath() {
@@ -1283,7 +1303,7 @@ ShaderModule* PipelineCache::Program::ShareModule(const ShaderRecompiler::IR::Re
 	const auto code = FunctionCode();
 	for (const auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
-		if (candidate.shared_variant ||
+		if (candidate.shared_variant || candidate.linked_prepared ||
 		    layout.push_data_start_dword !=
 		        ShaderRecompiler::IR::PushData::StartFor(push_data_cursor, layout.ShaderDataDwords()) ||
 		    (calls && !std::ranges::equal(candidate.function_code, code)) ||
@@ -1316,7 +1336,7 @@ void PipelineCache::Program::PromoteEmptyBuffers(const ShaderRecompiler::IR::Res
 	bool changed  = false;
 	for (const auto& module: modules) {
 		const auto& candidate = module.specialization.buffers;
-		if (module.shared_variant || candidate.size() != promoted.buffers.size()) continue;
+		if (module.shared_variant || module.linked_prepared || candidate.size() != promoted.buffers.size()) continue;
 		for (uint32_t i = 0; i < candidate.size(); i++) {
 			const auto& form = candidate[i];
 			if (form.zero_stride_oob || form.scalar_empty || form == specialization.buffers[i] ||
@@ -1505,6 +1525,38 @@ void PipelineCache::DestroyModule(const ShaderModule& module) const {
 		m_graphics.device.destroyShaderModule(module.plain->module, nullptr);
 	}
 }
+
+#if defined(ANYPS5_KYTY)
+const ShaderModule* PipelineCache::RestoreLinkedModule(const ProgramKey& key, Program& program,
+                                                       const ShaderRecompiler::CompileOptions& options,
+                                                       std::span<const uint32_t> code, uint32_t cursor) {
+	if (!m_linked_store || !program.call_source || program.call_source->expand_calls) return nullptr;
+	const auto* entry = m_linked_store->Find(key.hash, key.user_data_count, key.static_state, code,
+	                                         program.FunctionCode(), program.specialization, cursor);
+	if (entry == nullptr) return nullptr;
+	const auto& bindings = entry->module.info.bindings;
+	const auto& limits = m_graphics.GetPhysicalDeviceProperties().limits;
+	using namespace ShaderRecompiler::IR;
+	const auto samplers = bindings.descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Samplers)];
+	uint64_t images = 0, resources = 0;
+	for (auto mask = bindings.descriptor_mask; mask != 0; mask &= mask - 1u) {
+		const auto index = std::countr_zero(mask);
+		const auto kind = static_cast<DescriptorBindingKind>(index);
+		if (kind != DescriptorBindingKind::Samplers) resources += bindings.descriptor_counts[index];
+		if (ImageBindingResourceClass(kind) == ImageResourceClass::Sampled) images += bindings.descriptor_counts[index];
+	}
+	if (samplers > limits.maxPerStageDescriptorSamplers || samplers > limits.maxDescriptorSetSamplers ||
+	    images > limits.maxPerStageDescriptorSampledImages || images > limits.maxDescriptorSetSampledImages ||
+	    images > DescriptorHeap::MaxSampledImages || resources > limits.maxPerStageResources) return nullptr;
+	auto prepared = entry->module;
+	prepared.module = CompileSPV(entry->spirv, m_graphics.device);
+	if (prepared.module == nullptr) return nullptr;
+	prepared.plan = &program.resource_plan;
+	prepared.guest_traversal = RayTracing::NativeTraversals() && !options.native_ray_tracing;
+	prepared.linked_prepared = true;
+	return &program.modules.emplace_back(std::move(prepared));
+}
+#endif
 
 ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& key,
                                            ShaderRecompiler::CompileOptions  options,
@@ -1933,6 +1985,11 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		if (failed) return skip_failure();
 	}
 #if defined(ANYPS5_KYTY)
+	if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+		if (const auto* prepared = RestoreLinkedModule(entry->first, entry->second, options, params.code, push_data_cursor)) {
+			return bind(*prepared);
+		}
+	}
 	entry->second.PromoteEmptyBuffers(entry->second.resources, entry->second.specialization, push_data_cursor);
 	if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 		WidenComputeVariant(entry->first, entry->second, params, input_info, push_data_cursor, natural);
@@ -3450,8 +3507,12 @@ void PipelineCache::AsyncPipelineWorker() {
 		Pipeline   pipeline;
 		pipeline.native_bindings = job.native;
 		const auto started = std::chrono::steady_clock::now();
+		bool cache_hit = false;
 		if (job.compute) {
-			CreatePipelineInternal(m_graphics, pipeline, *job.module, m_driver_cache);
+#if defined(ANYPS5_KYTY)
+			cache_hit = job.module->linked_prepared && FindComputePipeline(m_graphics, pipeline, *job.module, m_driver_cache);
+#endif
+			if (!cache_hit) CreatePipelineInternal(m_graphics, pipeline, *job.module, m_driver_cache);
 		} else {
 #if defined(ANYPS5_KYTY)
 			if (!CreateGraphicsPipelineFast(pipeline, job.key, job.stages))
@@ -3459,7 +3520,7 @@ void PipelineCache::AsyncPipelineWorker() {
 				CreatePipelineInternal(m_graphics, pipeline, job.key, job.stages, m_driver_cache);
 		}
 		const bool created = pipeline.pipeline != nullptr && pipeline.pipeline_layout != nullptr;
-		if (created) {
+		if (created && !cache_hit) {
 			NoteCreatedPipeline(started);
 		}
 		std::lock_guard lock(m_async_mutex);
@@ -4335,6 +4396,7 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 				lock.unlock();
 #if defined(ANYPS5_KYTY)
 				LogRuntimePipelineMiss("graphics", "queued", GraphicsPipelineKeyHash {}(key), stall_hash);
+				CaptureQueuedPipeline(key, command.GetShaders());
 #endif
 				QueueAsyncPipeline({.key = key, .stages = stages});
 #if defined(ANYPS5_KYTY)
@@ -4428,6 +4490,9 @@ PipelineCache::Pipeline* PipelineCache::GetGraphicsPipeline(const CommandBuffer&
 		                       GraphicsPipelineKeyHash {}(key), stall_hash);
 #endif
 	}
+#if defined(ANYPS5_KYTY)
+	CaptureQueuedPipeline(key, command.GetShaders());
+#endif
 	StorePipeline(key);
 	NoteCreatedPipeline(started);
 	NoteUse(pipeline, stages);
@@ -4670,6 +4735,12 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		}
 	}
 	auto& pipeline = m_compute_pipelines[module.id];
+#if defined(ANYPS5_KYTY)
+	if (module.linked_prepared && FindComputePipeline(m_graphics, pipeline, module, m_driver_cache)) {
+		NoteUse(pipeline, stages);
+		return pipeline;
+	}
+#endif
 
 	if (graphics_debug_dump_enabled()) {
 		ShaderDbgDumpInputInfo(input_info);

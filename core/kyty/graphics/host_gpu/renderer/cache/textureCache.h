@@ -69,7 +69,9 @@ public:
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
-	[[nodiscard]] vk::ImageView FindTexture(ImageId id, const ImageDesc& desc);
+	[[nodiscard]] vk::ImageView FindTexture(
+	    ImageId id, const ImageDesc& desc,
+	    std::source_location caller = std::source_location::current());
 	[[nodiscard]] ImageId CopyDepthForFeedback(ImageId depth_id, const ImageSubresourceRange& range,
 	                                           vk::ImageAspectFlags aspects);
 	[[nodiscard]] vk::ImageView FindRenderTarget(ImageId id, const ImageDesc& desc);
@@ -346,6 +348,7 @@ private:
 	}
 
 	[[nodiscard]] ImageId     InsertImage(const ImageInfo& info) KYTY_REQUIRES(m_lock);
+	[[nodiscard]] ImageId     InsertImage(const ImageInfo& info, bool bindless) KYTY_REQUIRES(m_lock);
 	void                      RegisterImage(ImageId id) KYTY_REQUIRES(m_lock);
 	void                      UnregisterImage(ImageId id) KYTY_REQUIRES(m_lock);
 	void                      DeleteImage(ImageId id) KYTY_REQUIRES(m_lock);

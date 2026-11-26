@@ -373,6 +373,7 @@ struct ShaderModule {
 #if defined(ANYPS5_KYTY)
 	mutable bool                                 pipeline_requested = false;
 	bool                                         shared_variant     = false;
+	bool                                         linked_prepared    = false;
 #endif
 };
 
@@ -442,6 +443,8 @@ private:
 	uint32_t                  m_samples  = 0;
 };
 
+class LinkedComputeStore;
+
 class PipelineCache {
 public:
 	PipelineCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap,
@@ -463,6 +466,7 @@ public:
 		bool                    stored                = false;
 		bool                    use_noted             = false;
 		bool                    native_bindings       = false;
+		bool                    linked_dispatch_noted = false;
 		ManifestFloatModes      float_modes {};
 		uint64_t                float_modes_generation = 0;
 	};
@@ -610,6 +614,9 @@ private:
 
 	using ModuleMap = std::unordered_map<uint64_t, const ShaderModule*>;
 
+#if defined(ANYPS5_KYTY)
+	std::unique_ptr<LinkedComputeStore>    m_linked_store;
+#endif
 	GraphicContext&                        m_graphics;
 	ShaderRecompiler::IR::ImageHeapSource* m_image_heap;
 	std::unordered_map<ProgramKey, Program, ProgramKeyHash> m_program_cache KYTY_GUARDED_BY(m_program_lock);
@@ -663,6 +670,11 @@ private:
 	const ShaderModule* GetAhead(const ShaderParams& params, InputInfo& input_info,
 	                             uint32_t& push_data_cursor, ProgramResolution& ahead)
 	    KYTY_NO_THREAD_SAFETY_ANALYSIS;
+#if defined(ANYPS5_KYTY)
+	const ShaderModule* RestoreLinkedModule(const ProgramKey& key, Program& program,
+	                                        const ShaderRecompiler::CompileOptions& options,
+	                                        std::span<const uint32_t> code, uint32_t cursor);
+#endif
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,
@@ -894,6 +906,7 @@ private:
 	                  std::span<const uint32_t> code, uint32_t push_data_cursor,
 	                  const ShaderModule& module);
 	bool RecordPipeline(const GraphicsPipelineKey& key, const ManifestFloatModes& float_modes);
+	void CaptureQueuedPipeline(const GraphicsPipelineKey& key, const HW::Shader& shaders);
 	void NoteFloatModes(Pipeline& pipeline, const GraphicsPipelineKey& key, const HW::Shader& shaders);
 	void RecordLayout(uint64_t key, const ShaderTessellationInputInfo& layout);
 	static void OnShaderMapped(void* userdata, uint64_t hash, std::span<const uint32_t> code);

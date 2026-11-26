@@ -26,6 +26,7 @@
 #include <SDL3/SDL.h>
 #include <stb_image.h>
 #include <algorithm>
+#include <cstdlib>
 #include <atomic>
 #include <cctype>
 #include <charconv>
@@ -3226,6 +3227,38 @@ void PipelineCache::RecordModule(const ProgramKey&                       key,
 		state.module_records[module.plain->id] = {found->second, true};
 	}
 	state.module_generation.fetch_add(1, std::memory_order_release);
+}
+
+void PipelineCache::CaptureQueuedPipeline(const GraphicsPipelineKey& key, const HW::Shader& shaders) {
+	static const bool enabled = std::getenv("KYTY_CAPTURE_QUEUED_PIPELINES") != nullptr;
+	if (!enabled || m_manifest == nullptr || m_manifest->record_path.empty()) {
+		return;
+	}
+	PipelineManifest capture;
+	ManifestPipeline recipe {.key = key, .float_modes = ReadManifestFloatModes(shaders, key.stage_ids)};
+	recipe.key.stage_ids = {};
+	const auto variant = GraphicsPipelineKeyHash {}(key);
+	{
+		std::scoped_lock lock(m_manifest->mutex);
+		for (size_t i = 0; i < key.stage_ids.size(); ++i) {
+			if (key.stage_ids[i] == 0) continue;
+			const auto found = m_manifest->module_records.find(key.stage_ids[i]);
+			if (found == m_manifest->module_records.end() || (found->second.second && i != 3)) {
+				ManifestLog("[kyty-queued-recipe] {:016x} missing stage={} module={:016x}",
+				            variant, i, key.stage_ids[i]);
+				return;
+			}
+			recipe.stages[i] = static_cast<uint32_t>(capture.modules.size());
+			recipe.plain_pixel |= found->second.second;
+			capture.modules.push_back(m_manifest->recorded.modules[found->second.first]);
+		}
+	}
+	capture.pipelines.push_back(recipe);
+	const auto bytes = SaveManifest(capture);
+	std::string_view text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+	for (auto line: ManifestText::Split(text, '\n')) {
+		if (!line.empty()) ManifestLog("[kyty-queued-recipe] {:016x} {}", variant, line);
+	}
 }
 
 bool PipelineCache::RecordPipeline(const GraphicsPipelineKey& key,

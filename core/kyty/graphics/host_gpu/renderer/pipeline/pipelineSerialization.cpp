@@ -17,6 +17,8 @@
 #include <string>
 #include <xxhash.h>
 #if defined(ANYPS5_KYTY)
+#include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
+#include <fstream>
 #include "kytyShaderStoreStamp.h"
 
 #include <cstdlib>
@@ -167,6 +169,18 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 	if (header.empty()) {
 		return;
 	}
+#if defined(ANYPS5_KYTY)
+	auto linked_path = path;
+	std::ifstream linked(linked_path.replace_extension(".linked"), std::ios::binary);
+	if (linked) {
+		auto store = std::make_unique<LinkedComputeStore>();
+		if (store->Read(linked, header)) {
+			m_linked_store = std::move(store);
+		} else {
+			Log::WriteToConsoleAndLog("Shader cache: incompatible or invalid linked compute store\n");
+		}
+	}
+#endif
 	const auto           start = std::chrono::steady_clock::now();
 	std::vector<uint8_t> bytes;
 	if (Common::File file;

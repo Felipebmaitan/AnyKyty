@@ -37,6 +37,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <fmt/format.h>
 #include <limits>
 #include <mutex>
 #include <span>
@@ -44,6 +46,19 @@
 #include <vector>
 
 namespace Libs::Graphics {
+static void NoteLinkedDispatch(const ShaderModule& module, PipelineCache::Pipeline& pipeline) {
+#if defined(ANYPS5_KYTY)
+	if (!module.linked_prepared || module.shared_variant || pipeline.linked_dispatch_noted) return;
+	pipeline.linked_dispatch_noted = true;
+	static const bool trace = [] {
+		const char* value = std::getenv("KYTY_SHADER_VARIANT_LOG");
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}();
+	if (trace) Log::WriteToConsoleAndLog(fmt::format("[kyty-variant] linked-dispatch shader={:016x} module={:016x}\n",
+	                                                 module.info.shader_hash, module.id));
+#endif
+}
+
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
@@ -682,6 +697,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		} else {
 			vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 		}
+		NoteLinkedDispatch(*input_info.stage.module, pipeline);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 		if (rt_pass == 1) {
 			RtCheck().AfterOracle(bindings, counted);
@@ -938,6 +954,7 @@ void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t arg
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	m_context.NoteFirstGuestCommand(true);
 	vk_buffer.dispatchIndirect(stream.Handle(), scratch_offset);
+	NoteLinkedDispatch(*input_info.stage.module, pipeline);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
 }
@@ -1034,6 +1051,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 		m_context.NoteFirstGuestCommand(true);
 		vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+		NoteLinkedDispatch(*input_info.stage.module, pipeline);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 		if (rt_pass == 1) {
 			RtCheck().AfterOracle(bindings, counted);
