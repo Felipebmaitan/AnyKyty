@@ -288,7 +288,8 @@ bool TableInGuestMemory(uint64_t base, uint64_t size, const SrtRuntime& runtime)
 	       ReadScalarTable(base, size, size - 4u, runtime, word);
 }
 
-bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource) {
+bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferResource& resource,
+                             uint32_t read_components) {
 	ShaderBufferResource descriptor;
 	if (!DecodeBufferDescriptor(value, descriptor)) return false;
 	const bool formatted_read = resource.formatted && resource.read && !resource.written;
@@ -312,6 +313,15 @@ bool NormalizeIndirectBuffer(DescriptorValue& value, bool indexed, const BufferR
 		const auto format = Format::GetFormatInfo(descriptor.Format());
 		if (!indexed || format.type == Format::ComponentType::Unknown)
 			return SpecializationFail("indirect formatted buffers require a supported indexed format");
+		for (uint32_t component = 0; formatted_read && component < 4u; component++) {
+			if ((read_components & (1u << component)) != 0u &&
+			    Format::ResolveFormattedSource(format, GetDstSel(descriptor.DstSelXYZW(), component)).kind ==
+			        Format::FormattedSourceKind::Invalid)
+				return SpecializationFail(fmt::format(
+				    "indirect formatted buffer descriptor has a reserved dst_sel: "
+				    "descriptor={:08x},{:08x},{:08x},{:08x} component={}",
+				    value.dwords[0], value.dwords[1], value.dwords[2], value.dwords[3], component));
+		}
 		if (!formatted_read) {
 			const bool scalar = resource.max_byte_extent == 4u &&
 			    (descriptor.Format() == Prospero::BufferFormat::k32UInt ||
@@ -2323,6 +2333,19 @@ void ReadStridesAtRunTime(const ResourcePlan& program, ResourceSpecialization& s
 	}
 }
 
+uint32_t FormattedReadComponents(const ResourcePlan& program, uint32_t index) {
+	uint32_t mask = 0;
+	for (const auto& memory: program.memory_info) {
+		if (memory.kind != ResourceKind::Buffer || memory.resource != index || !memory.formatted ||
+		    memory.typed) {
+			continue;
+		}
+		const auto count = std::min(memory.data_bits == 16u ? memory.component_count : memory.data_dwords, 4u);
+		mask |= (1u << count) - 1u;
+	}
+	return mask;
+}
+
 #if defined(ANYPS5_KYTY)
 bool SharesEmptyBuffers() {
 	static const bool on = [] {
@@ -2367,19 +2390,6 @@ void ShareNullBufferVariants(const ResourcePlan& program, ResourceSpecialization
 			ShareEmptyBuffer(program, i, runtime_stride, buffer);
 		}
 	}
-}
-
-uint32_t FormattedReadComponents(const ResourcePlan& program, uint32_t index) {
-	uint32_t mask = 0;
-	for (const auto& memory: program.memory_info) {
-		if (memory.kind != ResourceKind::Buffer || memory.resource != index || !memory.formatted ||
-		    memory.typed) {
-			continue;
-		}
-		const auto count = std::min(memory.data_bits == 16u ? memory.component_count : memory.data_dwords, 4u);
-		mask |= (1u << count) - 1u;
-	}
-	return mask;
 }
 
 std::optional<uint32_t> EmptyBufferReadBits(const ResourceSpecialization::Buffer& buffer, uint32_t component) {
@@ -2604,7 +2614,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 					        snapshot.buffers, specialization.buffers,
 					        [&](DescriptorValue& value) {
 						        return NormalizeIndirectBuffer(
-						            value, source->indirect_descriptor->indexed, base);
+						            value, source->indirect_descriptor->indexed, base,
+						            FormattedReadComponents(program, i));
 					        }))
 						return resource_failed("buffer", i, base.source, snapshot.buffers.size());
 				}
