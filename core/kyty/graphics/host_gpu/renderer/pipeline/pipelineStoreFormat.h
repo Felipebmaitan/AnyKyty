@@ -7,7 +7,6 @@
 #include <zstd.h>
 
 namespace Libs::Graphics {
-struct GraphicsPipelineKey;
 struct ShaderProgramKey;
 }
 
@@ -34,9 +33,6 @@ struct Key {
 [[nodiscard]] bool DecodeTableModuleRecord(ShaderRecompiler::IR::Reader& reader, ShaderProgramKey& key,
                                            uint32_t& cursor, ShaderModule& module, std::vector<uint32_t>& spirv,
                                            std::vector<uint32_t>& plain_spirv);
-[[nodiscard]] bool ValidNativeGraphicsStages(const GraphicsPipelineKey& key,
-                                             const std::array<const ShaderModule*, 4>& stages);
-
 template <class Stream, class Stamp, class Profile, class Limit>
 void IoStoreHeader(Stream& io, Stamp& stamp, Profile& profile, Limit& max_shared_memory) {
 	ShaderRecompiler::IR::IoAll(io, stamp, profile, max_shared_memory);

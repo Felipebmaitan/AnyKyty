@@ -216,8 +216,6 @@ void TableGraphicsModuleRoundTrips() {
 }
 
 void NativeGraphicsRequiresExactTableStages() {
-    using ShaderStoreFormat::ValidNativeGraphicsStages;
-
     ShaderModule vertex;
     vertex.id = 123u;
     vertex.info.stage = ShaderType::Vertex;

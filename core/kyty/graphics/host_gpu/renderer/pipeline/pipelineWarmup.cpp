@@ -1,7 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
-#include "graphics/host_gpu/renderer/pipeline/pipelineStoreFormat.h"
 
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
@@ -259,7 +258,7 @@ void PipelineCache::WarmUpNativePipelines() {
 			const auto found = modules.find(key.stage_ids[i]);
 			if (found != modules.end()) stages[i] = found->second;
 		}
-		if (!ShaderStoreFormat::ValidNativeGraphicsStages(key, stages) || !SampledDescriptorBudgetFits(stages)) continue;
+		if (!ValidNativeGraphicsStages(key, stages) || !SampledDescriptorBudgetFits(stages)) continue;
 		Pipeline pipeline;
 		pipeline.native_bindings = true;
 		const auto started = std::chrono::steady_clock::now();

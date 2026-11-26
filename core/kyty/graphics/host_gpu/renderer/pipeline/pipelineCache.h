@@ -1004,6 +1004,8 @@ uint64_t ShaderStoreBuildStamp();
 std::string StoreMismatch(std::span<const uint8_t> bytes, std::span<const uint8_t> header, uint64_t current_stamp);
 std::vector<uint8_t> StoreHeader(const GraphicContext& graphics, uint64_t stamp);
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics);
+[[nodiscard]] bool ValidNativeGraphicsStages(const GraphicsPipelineKey& key,
+                                             const std::array<const ShaderModule*, 4>& stages);
 
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const GraphicsPipelineKey&                 key,
