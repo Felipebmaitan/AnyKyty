@@ -61,17 +61,43 @@ std::vector<ResourceSpecialization> FindComputeVariants(const IR::Program& progr
 	base.images.resize(plan.info.images.size());
 	using Numeric = Prospero::TextureNumericClass;
 	using Dimension = ShaderRecompiler::Decoder::ImageDimension;
-	for (const auto storage: {Numeric::Float, Numeric::Uint, Numeric::Sint}) {
-		for (const auto sampled: {Numeric::Float, Numeric::Uint, Numeric::Sint}) {
-			for (size_t i = 0; i < base.images.size(); ++i) {
-				const auto& resource = plan.info.images[i];
-				auto& view = base.images[i];
-				view.dimension = resource.dimension == Dimension::Unknown ? Dimension::Dim2D : resource.dimension;
-				const bool storage_view = resource.resource_class == IR::ImageResourceClass::Storage;
-				view.numeric_class = resource.atomic ? Numeric::Uint : storage_view ? storage : sampled;
-				view.cube = resource.cube;
-			}
-			if (std::ranges::find(variants, base) == variants.end()) variants.push_back(base);
+	constexpr std::array numeric_classes {Numeric::Float, Numeric::Uint, Numeric::Sint};
+	const auto add_variant = [&](Numeric storage, Numeric sampled, uint32_t alternate_source = UINT32_MAX) {
+		for (size_t i = 0; i < base.images.size(); ++i) {
+			const auto& resource = plan.info.images[i];
+			auto& view = base.images[i];
+			view.dimension = resource.dimension == Dimension::Unknown ? Dimension::Dim2D : resource.dimension;
+			const bool storage_view = resource.resource_class == IR::ImageResourceClass::Storage;
+			const auto storage_class = resource.source == alternate_source
+			                               ? (storage == Numeric::Float ? Numeric::Uint : Numeric::Float) : storage;
+			view.numeric_class = resource.atomic ? Numeric::Uint : storage_view ? storage_class : sampled;
+			view.cube = resource.cube;
+		}
+		if (std::ranges::find(variants, base) == variants.end()) variants.push_back(base);
+	};
+	for (const auto storage: numeric_classes) {
+		for (const auto sampled: numeric_classes) add_variant(storage, sampled);
+	}
+
+	std::vector<uint32_t> outputs;
+	for (const auto& image: plan.info.images) {
+		if (image.source >= plan.descriptor_sources.size()) return variants;
+		const auto& source = plan.descriptor_sources[image.source];
+		if (source.indirect_descriptor) return variants;
+		if (image.resource_class != IR::ImageResourceClass::Storage) continue;
+		if (!image.written || image.read || image.atomic || source.dword_count <= 1u ||
+		    source.dwords[1].Resolve().IsImmediate()) return variants;
+		if (std::ranges::find(outputs, image.source) == outputs.end()) outputs.push_back(image.source);
+		if (outputs.size() > 2) return variants;
+	}
+	if (outputs.size() == 2 &&
+	    std::ranges::none_of(plan.info.images, [&](const auto& image) {
+		    return image.resource_class != IR::ImageResourceClass::Storage &&
+		           std::ranges::find(outputs, image.source) != outputs.end();
+	    })) {
+		for (const auto sampled: numeric_classes) {
+			add_variant(Numeric::Float, sampled, outputs.front());
+			add_variant(Numeric::Uint, sampled, outputs.front());
 		}
 	}
 	return variants;
