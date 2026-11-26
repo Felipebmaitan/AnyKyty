@@ -409,6 +409,18 @@ extern "C" void AgcDriverSuspendPoint_nid_postfix() {
     Call(Api().suspend_point);
 }
 
+extern "C" bool AgcDriverHasStartupPipelineData_nid_postfix() {
+    bool available = false;
+    Check(Api().has_startup_pipeline_data(&available));
+    return available;
+}
+
+extern "C" bool AgcDriverWaitForStartupManifest_nid_postfix(uint32_t* done, uint32_t* total, bool* memoryPaused) {
+    bool ready = false;
+    Check(Api().wait_for_startup_manifest(done, total, memoryPaused, &ready));
+    return ready;
+}
+
 extern "C" void AgcDriverWaitIdle_nid_postfix() {
     Call(Api().wait_idle);
 }

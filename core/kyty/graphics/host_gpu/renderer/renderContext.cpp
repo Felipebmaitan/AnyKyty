@@ -55,6 +55,15 @@ RenderContext::~RenderContext() {
 	m_command_scheduler.Shutdown();
 }
 
+void RenderContext::NoteFirstGuestCommand(bool compute) {
+	const uint8_t bit = compute ? 2 : 1;
+	if ((m_first_guest_commands.load(std::memory_order_relaxed) & bit) != 0 ||
+	    (m_first_guest_commands.fetch_or(bit, std::memory_order_relaxed) & bit) != 0) return;
+	const auto now = std::chrono::steady_clock::now().time_since_epoch();
+	std::fprintf(stderr, "[kyty-startup] first_%s monotonic_ns=%lld\n", compute ? "dispatch" : "draw",
+	             static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()));
+}
+
 void RenderContext::InitializeGpu(VideoOut::VideoOutDriver* video_out) {
 	EXIT_IF(m_gpu != nullptr);
 	m_video_out = video_out;

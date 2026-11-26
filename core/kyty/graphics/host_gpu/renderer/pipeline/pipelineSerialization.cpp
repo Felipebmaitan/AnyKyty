@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineStoreFormat.h"
 
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
 #include "common/stringUtils.h"
@@ -54,10 +55,6 @@ uint64_t BuildStamp() {
 		return static_cast<uint64_t>(KYTY_SHADER_STORE_STAMP);
 	}();
 	return stamp;
-}
-
-size_t WarmUpThreads(size_t jobs) {
-	return std::max<size_t>(1, std::min<size_t>(Common::ParallelThreads(), jobs));
 }
 
 bool WarmUpSharedCache(const GraphicContext& graphics) {
@@ -179,10 +176,10 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 		file.Read(bytes.data(), static_cast<uint32_t>(bytes.size()), &read);
 		bytes.resize(read);
 	}
+	const auto workers = Common::ParallelThreads();
 	Log::WriteToConsoleAndLog(fmt::format(
-	    "Shader cache: compiling shaders and pipelines from {} ({:.1f} MB) with {} threads\n",
-	    Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0,
-	    Common::ParallelThreads()));
+	    "Shader cache: reading {} ({:.1f} MB) with up to {} threads\n",
+	    Common::PathToString(path), static_cast<double>(bytes.size()) / 1'000'000.0, workers));
 	auto       records = std::span<const uint8_t>(bytes);
 	const bool reusable =
 	    records.size() >= header.size() && std::ranges::equal(records.first(header.size()), header);
@@ -200,7 +197,8 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 		}
 		std::vector<StoreRecord> loaded(frames.size());
 		std::vector<uint8_t>     read(frames.size());
-		Common::ParallelFor(frames.size(), [&](size_t i) { read[i] = ReadRecord(frames[i], loaded[i]) ? 1 : 0; });
+		Common::ParallelFor(frames.size(), [&](size_t i) { read[i] = ReadRecord(frames[i], loaded[i]) ? 1 : 0; },
+		                    workers);
 		size_t kept = 0;
 		while (kept < frames.size() && read[kept] != 0 && AddRecord(loaded[kept])) {
 			records = records.subspan(frames[kept].size());
@@ -216,6 +214,32 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 
 	const auto modules = MapModules();
 #if defined(ANYPS5_KYTY)
+	if (Config::PipelineManifestEnabled() && !PipelineCacheTitleId().empty()) {
+		for (const auto& key: m_graphics_pipelines | std::views::keys) {
+			AsyncPipelineJob job {.key = key};
+			bool complete = true;
+			for (size_t i = 0; i < job.stages.size(); ++i) {
+				const auto found = modules.find(key.stage_ids[i]);
+				if (found == modules.end()) {
+					complete = false;
+					break;
+				}
+				job.stages[i] = found->second;
+			}
+			if (complete && job.stages[0] != nullptr) {
+				m_restore_jobs.push_back(job);
+			}
+		}
+		m_graphics_pipelines.clear();
+		for (const auto* module: modules | std::views::values) {
+			if (module != nullptr && module->info.stage == ShaderType::Compute) {
+				m_restore_jobs.push_back({.compute = true, .module = module});
+			}
+		}
+		Log::WriteToConsoleAndLog(fmt::format("Shader cache: restored {} modules, {} pipeline handles to resolve\n",
+		                                     modules.size() - 1, m_restore_jobs.size()));
+		return;
+	}
 	const bool shared = WarmUpSharedCache(m_graphics);
 	const bool lookup = driver_cache_restored && !shared && m_graphics.pipeline_cache_lookup_enabled;
 	std::vector<std::function<void(vk::PipelineCache)>> jobs;
@@ -244,7 +268,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 			}
 		}
 	}
-	const auto                     threads = WarmUpThreads(jobs.size());
+	const auto                     threads = std::max<size_t>(1, std::min(workers, jobs.size()));
 	std::vector<vk::PipelineCache> caches(threads);
 	for (auto& cache: caches) {
 		const vk::PipelineCacheCreateInfo create {};

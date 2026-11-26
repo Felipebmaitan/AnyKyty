@@ -269,6 +269,26 @@ void SampleThreads(HostStats& stats, Counters& now) {
 	vm_deallocate(task, reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
 }
 
+void SampleSystemMemory(mach_port_t host, HostStats& stats) {
+	stats.system_memory_total   = SysctlValue<uint64_t>("hw.memsize");
+	vm_size_t              page = 0;
+	vm_statistics64_data_t vm {};
+	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+	if (host_page_size(host, &page) == KERN_SUCCESS &&
+	    host_statistics64(host, HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm),
+	                      &count) == KERN_SUCCESS) {
+		const uint64_t app       = vm.internal_page_count > vm.purgeable_count
+		                               ? vm.internal_page_count - vm.purgeable_count
+		                               : 0;
+		stats.system_memory_used = (app + vm.wire_count + vm.compressor_page_count) * page;
+		stats.system_wired       = static_cast<uint64_t>(vm.wire_count) * page;
+		stats.system_compressed  = static_cast<uint64_t>(vm.compressor_page_count) * page;
+		stats.system_cached =
+		    (static_cast<uint64_t>(vm.external_page_count) + vm.purgeable_count) * page;
+		stats.system_free = static_cast<uint64_t>(vm.free_count) * page;
+	}
+}
+
 void SamplePlatform(PlatformState& state, HostStats& stats, Counters& now) {
 	SampleRusage(now);
 
@@ -298,23 +318,7 @@ void SamplePlatform(PlatformState& state, HostStats& stats, Counters& now) {
 		now.disk_write = usage.ri_diskio_byteswritten;
 	}
 
-	stats.system_memory_total   = SysctlValue<uint64_t>("hw.memsize");
-	vm_size_t              page = 0;
-	vm_statistics64_data_t vm {};
-	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
-	if (host_page_size(state.host, &page) == KERN_SUCCESS &&
-	    host_statistics64(state.host, HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm),
-	                      &count) == KERN_SUCCESS) {
-		const uint64_t app       = vm.internal_page_count > vm.purgeable_count
-		                               ? vm.internal_page_count - vm.purgeable_count
-		                               : 0;
-		stats.system_memory_used = (app + vm.wire_count + vm.compressor_page_count) * page;
-		stats.system_wired       = static_cast<uint64_t>(vm.wire_count) * page;
-		stats.system_compressed  = static_cast<uint64_t>(vm.compressor_page_count) * page;
-		stats.system_cached =
-		    (static_cast<uint64_t>(vm.external_page_count) + vm.purgeable_count) * page;
-		stats.system_free = static_cast<uint64_t>(vm.free_count) * page;
-	}
+	SampleSystemMemory(state.host, stats);
 
 	if (const auto swap = SysctlValue<xsw_usage>("vm.swapusage")) {
 		stats.swap_used  = swap->xsu_used;
@@ -484,6 +488,28 @@ void SamplePlatform(PlatformState& , HostStats& stats, Counters& now) {
 
 constexpr size_t BUSIEST_THREADS = 6;
 
+}
+
+std::optional<SystemMemory> ReadSystemMemory() {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	MEMORYSTATUSEX memory {};
+	memory.dwLength = sizeof(memory);
+	if (GlobalMemoryStatusEx(&memory)) return SystemMemory {memory.ullTotalPhys, memory.ullAvailPhys};
+#elif defined(__APPLE__)
+	PlatformState state;
+	HostStats stats;
+	SampleSystemMemory(state.host, stats);
+	if (stats.system_memory_total && stats.system_memory_used) {
+		const auto total = *stats.system_memory_total;
+		return SystemMemory {total, total - std::min(total, *stats.system_memory_used)};
+	}
+#else
+	const auto memory = ReadProcValues("/proc/meminfo");
+	const auto total = Find(memory, "MemTotal");
+	const auto available = Find(memory, "MemAvailable");
+	if (total && available && *available <= *total) return SystemMemory {*total, *available};
+#endif
+	return std::nullopt;
 }
 
 struct HostStatsSampler::Impl {

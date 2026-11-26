@@ -449,6 +449,9 @@ public:
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
+	static bool HasStartupPipelineData();
+	bool WaitForStartupManifest(std::chrono::milliseconds timeout, uint32_t& done, uint32_t& total,
+	                            bool& memory_paused);
 
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
@@ -457,6 +460,7 @@ public:
 		vk::ShaderStageFlags    push_stages;
 		bool                    uses_push_descriptors = false;
 		bool                    uses_image_heap       = false;
+		bool                    stored                = false;
 		bool                    use_noted             = false;
 		bool                    native_bindings       = false;
 		ManifestFloatModes      float_modes {};
@@ -735,6 +739,7 @@ private:
 		std::array<const ShaderModule*, 4> stages {};
 		const ShaderModule*                module = nullptr;
 	};
+	std::deque<AsyncPipelineJob> m_restore_jobs;
 	std::unordered_set<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_async_pending_graphics;
 	std::unordered_set<uint64_t>                                     m_async_pending_compute;
 	std::unordered_set<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_async_failed_graphics;
@@ -816,7 +821,7 @@ private:
 	[[nodiscard]] bool LiveTargets(const DrawTargets& targets) const;
 	RenderContext* m_render = nullptr;
 	bool CreateGraphicsPipelineNow(Pipeline& pipeline, const GraphicsPipelineKey& key,
-	                               const std::array<const ShaderModule*, 4>& stages);
+	                               const std::array<const ShaderModule*, 4>& stages, bool allow_link = true);
 	bool CreateGraphicsPipelineFast(Pipeline& pipeline, const GraphicsPipelineKey& key,
 	                                const std::array<const ShaderModule*, 4>& stages);
 	void ApplyOptimizedPipelines();
@@ -855,7 +860,7 @@ private:
 	bool InitializeDriverCache();
 	void CheckpointDriverCache(bool slow_creation = false);
 	void NoteCreatedPipeline(std::chrono::steady_clock::time_point started);
-	void PostDueDriverCache();
+	void PostDueDriverCache(bool force = false);
 	void WriteDriverCache();
 
 	void WarmUp(const std::filesystem::path& path, bool driver_cache_restored);
@@ -896,13 +901,17 @@ private:
 	void CodeStoreThread(const std::stop_token& stop);
 	bool ScanGameFiles(const std::stop_token&                                          stop,
 	                   const std::function<void(uint64_t, std::span<const uint32_t>)>& append);
-	void ManifestWorker(const std::stop_token& stop);
+	void ManifestWorker(const std::stop_token& stop, bool allow_large);
 	std::pair<uint32_t, uint32_t> AddManifestRecords(PipelineManifest& loaded);
 	void ReloadSharedManifest();
 	void BuildManifestModule(uint32_t index, std::span<const uint32_t> code,
-	                         std::span<const uint32_t> back_code, bool guest_traversal = false);
-	void CreateManifestPipeline(uint32_t index);
-	void CreateManifestComputePipeline(const ShaderModule& module, bool from_assets);
+	                         std::span<const uint32_t> back_code, const std::stop_token& stop, bool guest_traversal = false);
+	void FinishStartupIfIdle();
+	void CreateManifestPipeline(uint32_t index, const std::stop_token& stop);
+	void CreateManifestGraphicsPipeline(const GraphicsPipelineKey& key, const std::array<const ShaderModule*, 4>& stages,
+	                                    bool from_assets, bool stored, const std::stop_token& stop);
+	void CreateManifestComputePipeline(const ShaderModule& module, bool from_assets, const std::stop_token& stop);
+	static ProgramKey ManifestProgramKey(const ManifestModule& record, bool native);
 	void SetHostInput(ManifestModule& module) const;
 	const ShaderModule* FindCompiledModule(
 	    const ProgramKey& key, const ShaderRecompiler::IR::ResourceSpecialization& specialization,
@@ -915,6 +924,9 @@ private:
 		uint32_t pipelines       = 0;
 		uint32_t running         = 0;
 		bool     scanning        = false;
+		uint32_t startup_total   = 0;
+		uint32_t startup_done    = 0;
+		bool     memory_paused   = false;
 		uint64_t modules_done    = 0;
 		uint64_t pipelines_done  = 0;
 		uint32_t threads         = 0;

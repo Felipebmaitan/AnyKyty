@@ -221,6 +221,7 @@ None is needed: a game converted with the relinker starts and runs on the defaul
 | `ANYPS5_VBLANK_HZ` | 30 to 360 | Vblank rate. A game that paces on vblank runs at the display's rate (about 60 FPS); raising it, for example to `240`, lifts that cap |
 | `ANYPS5_FPS_LIMIT` | 0.5 or more, `0` for no limit | Most frames per second the game presents |
 | `KYTY_PRESENT_MODE` | `Fifo`, `Mailbox`, `Immediate` | Vulkan present mode (`Mailbox` by default): `Fifo` waits for the display, `Immediate` may tear |
+| `KYTY_STARTUP_WAIT_SECONDS` | Whole seconds, default `900` | Maximum time the startup screen waits for known shaders and pipelines before the title’s entry point. Set `0` to start immediately. The title also starts after 120 seconds without a completed job. Pending work continues in the background. On Linux, dependent ELF modules may initialize before the main entry point |
 | `KYTY_ASYNC_PIPELINES` | `0`, `1` (default), `2` | What a draw does while its pipeline is still compiling: with `1` it waits up to 20 ms and is then skipped, so an object can be missing for a few frames the first time it shows; `2` skips more draws and waits for no new pipeline, for fewer stutters on a first run; `0` always waits, which avoids missing objects and stalls longer on a first run |
 | `KYTY_NATIVE_RT` | unset (default), `0`, `1` | Unset: native ray tracing when the GPU supports it. `0`: ray tracing emulated in shaders, for a GPU or a driver that struggles with it. `1`: native, and a stop with a message when the GPU cannot |
 

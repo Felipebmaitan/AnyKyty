@@ -424,6 +424,7 @@ WaveSplitCheck& RenderExecutor::SplitCheck() {
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute) {
+	m_context.NoteFirstGuestCommand(true);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -791,6 +792,7 @@ struct IndirectThreadPass {
 
 void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t args_addr,
                                              uint32_t mode, bool async_compute) {
+	m_context.NoteFirstGuestCommand(true);
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
@@ -942,6 +944,7 @@ void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t arg
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
                                       bool async_compute) {
+	m_context.NoteFirstGuestCommand(true);
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();

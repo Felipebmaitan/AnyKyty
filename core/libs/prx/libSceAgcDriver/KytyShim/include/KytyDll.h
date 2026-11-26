@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-#define KYTY_DLL_ABI_VERSION 3u
+#define KYTY_DLL_ABI_VERSION 4u
 #define KYTY_DLL_CREATE_SYMBOL "KytyDllCreate"
 #define KYTY_DLL_FILE_NAME L"kyty_gpu.prx"
 
@@ -191,6 +191,8 @@ typedef struct KytyDllApi {
     KytyDllStatus (*submit_graphics)(uint32_t* commands, uint32_t dwords);
     KytyDllStatus (*suspend_point)(void);
     KytyDllStatus (*wait_idle)(void);
+    KytyDllStatus (*has_startup_pipeline_data)(bool* available);
+    KytyDllStatus (*wait_for_startup_manifest)(uint32_t* done, uint32_t* total, bool* memory_paused, bool* ready);
     KytyDllStatus (*prestart_gpu)(void);
     KytyDllStatus (*shutdown)(void);
     KytyDllStatus (*check_guest_memory)(const void* pointer, size_t bytes, size_t alignment, bool writable);
