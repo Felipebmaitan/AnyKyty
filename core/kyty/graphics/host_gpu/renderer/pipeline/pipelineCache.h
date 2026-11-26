@@ -9,6 +9,7 @@
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineStoreTypes.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -357,32 +358,9 @@ struct OptimizedGraphicsPipeline {
                                                                bool ps_active, bool ps_sample_shading);
 #endif
 
-struct ShaderModule {
-	uint64_t                                     id     = 0;
-	vk::ShaderModule                             module = nullptr;
-	ShaderRecompiler::IR::CompiledShaderInfo     info;
-	ShaderRecompiler::IR::ResourceSpecialization specialization;
-	std::vector<uint32_t>                        function_code;
-	std::vector<vk::Format>                      vertex_formats;
-	std::vector<RectListParameter>               rect_parameters;
-	bool                                         mesh_task = false;
-	uint32_t                                     spirv_words = 0;
-	std::shared_ptr<const ShaderModule>          plain;
-	bool                                         guest_traversal = false;
-	ShaderBvh                                    bvh = ShaderBvh::None;
-	uint32_t                                     rt_mode = 0;
-	const ShaderRecompiler::IR::ResourcePlan*    plan = nullptr;
-#if defined(ANYPS5_KYTY)
-	mutable bool                                 pipeline_requested = false;
-	bool                                         shared_variant     = false;
-#endif
-};
-
 [[nodiscard]] std::shared_ptr<const ShaderModule> MakePlainModule(const ShaderModule&   module,
                                                                   std::span<const uint32_t> spirv,
                                                                   vk::Device            device);
-
-inline constexpr uint64_t PlainModuleIdXor = 0x9e3779b97f4a7c15ull;
 
 [[nodiscard]] bool SmallColorTargetDraw(const HW::Context& context);
 [[nodiscard]] bool RecordsNoMipStats(const ShaderStageRuntime& stage);
@@ -590,15 +568,7 @@ private:
 #endif
 	};
 
-	struct ProgramKey {
-		ShaderType            stage           = ShaderType::Unknown;
-		uint64_t              hash            = 0;
-		uint32_t              user_data_count = 0;
-		std::vector<uint32_t> static_state;
-		bool                  guest_traversal = false;
-
-		bool operator==(const ProgramKey&) const = default;
-	};
+	using ProgramKey = ShaderProgramKey;
 
 	struct ProgramKeyHash {
 		std::size_t operator()(const ProgramKey& key) const { return key.hash; }
@@ -893,12 +863,16 @@ private:
 	void WriteDriverCache();
 
 	void WarmUp(const std::filesystem::path& path, bool driver_cache_restored);
+	size_t RestoreStoreRecords(std::span<const uint8_t> bytes, std::span<const uint8_t> header);
 	struct StoreRecord;
 	bool ReadRecord(std::span<const uint8_t> frame, StoreRecord& record) const;
 	bool AddRecord(StoreRecord& record) KYTY_REQUIRES(m_program_lock);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv, const std::vector<uint32_t>& plain_spirv);
 	void StorePipeline(const GraphicsPipelineKey& key);
+	bool ResolveTessellationLayout(const HW::ShaderRegisters& sh, const ShaderParams& ls,
+	                               const ShaderParams& hs, uint64_t address, bool lookup_only,
+	                               ShaderTessellationInputInfo& tess) KYTY_REQUIRES(m_program_lock);
 	void StoreLayout(uint64_t key, const ShaderTessellationInputInfo& layout);
 	[[nodiscard]] ModuleMap MapModules() const KYTY_REQUIRES(m_program_lock);
 	bool CreateGraphicsPipeline(Pipeline& pipeline, const GraphicsPipelineKey& key,
@@ -937,6 +911,7 @@ private:
 	                         std::span<const uint32_t> back_code, bool guest_traversal = false);
 	void CreateManifestPipeline(uint32_t index);
 	void CreateManifestComputePipeline(const ShaderModule& module, bool from_assets);
+	void SetComputeLdsStorage(ShaderComputeInputInfo& input) const;
 	void SetHostInput(ManifestModule& module) const;
 	const ShaderModule* FindCompiledModule(
 	    const ProgramKey& key, const ShaderRecompiler::IR::ResourceSpecialization& specialization,
@@ -979,6 +954,9 @@ uint32_t RayTracingModuleMode(ShaderBvh bvh, ShaderType stage, bool native, bool
 
 std::string PipelineCacheTitleId();
 std::filesystem::path ShaderStorePath();
+uint64_t ShaderStoreBuildStamp();
+std::string StoreMismatch(std::span<const uint8_t> bytes, std::span<const uint8_t> header, uint64_t current_stamp);
+std::vector<uint8_t> StoreHeader(const GraphicContext& graphics, uint64_t stamp);
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics);
 
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
