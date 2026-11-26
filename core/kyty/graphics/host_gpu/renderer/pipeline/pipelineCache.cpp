@@ -1860,7 +1860,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			const bool generic = specialized && !m_queue_only && ShaderRecompiler::IR::GenericComputeVariants();
 			if (generic && module != nullptr && ComputePipelineState(*module) != 2u) {
 				if (auto* served = ServeComputeVariant(cached, push_data_cursor, module, 2u)) {
-					CreateComputePipelineAhead(*module);
+					if (SpecializesComputeInBackground()) CreateComputePipelineAhead(*module);
 					return bind(*served);
 				}
 			} else if (generic && module == nullptr) {
