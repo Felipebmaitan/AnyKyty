@@ -318,6 +318,14 @@ python3 tools/graphics-precache/collect.py run.log --manifest recorded.kpm --out
 
 The collector reports missing dependencies and interrupted captures. Install `merged.kpm` as `_PipelineCache/<title id>_<version>.kpm` alongside the matching `.code` store, then run `kyty_precache` before launching the title. Keep the captured logs and derived cache files local.
 
+The offline bundle inventory reads loose `SGD5` databases with native `sgaProg` records, including aligned databases embedded in a readable archive. It uses the native `xxhash` library for the guest code identities. The shared container layout is described in the [SGD5 format notes](https://github.com/rpatty-dev/PercyStar/blob/main/docs/SGD5-layout.md).
+
+```sh
+python3 tools/graphics-precache/bundle.py asset.rpf --reference recorded.kpm --output inventory.json
+```
+
+The optional inventory contains stage hashes, per-pass states and bindings, and the serialized rasterizer, depth/stencil and blend tables. The reference report measures vertex/pixel shader pairing coverage. Pass data alone may leave attachment formats, vertex bindings and resource specializations unresolved. Keep the exported inventory local.
+
 ### AnyPS5 settings that an AnyKyty session also reads
 
 The window, the flip and vblank pacing, the guest memory and the thread priority of the presenter are AnyPS5's, so their `ANYPS5_*` and `APS5_*` settings apply with the Kyty backend. Each has its row in [ENVIRONMENT](ENVIRONMENT.md); this table says what it does here. Settings read only by AnyPS5's own GPU driver (`core/libs/prx/libSceAgcDriver/Execution/`, which this build does not compile) have no effect: `ANYPS5_PRESENT_MODE` is replaced by `KYTY_PRESENT_MODE`. `ANYPS5_GPU` is read by this build too.
