@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineManifest.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineLibrary.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineShaderOptions.h"
 
 #include "common/alignment.h"
@@ -3228,6 +3229,9 @@ void PipelineCache::CreateManifestGraphicsPipeline(const GraphicsPipelineKey& ke
 		}
 		m_async_pending_graphics.erase(key);
 	}
+#if defined(ANYPS5_KYTY)
+	if (created && m_libraries != nullptr) m_libraries->NotePreparedPipeline(key, stages);
+#endif
 	const auto elapsed = std::chrono::steady_clock::now() - start;
 	std::scoped_lock lock(state.mutex);
 	if (!created) ManifestLog("[kyty-startup] unresolved_graphics key={:016x} reason=creation_failed", key_hash);

@@ -18,6 +18,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -65,6 +66,7 @@ public:
 	[[nodiscard]] static bool Eligible(const Stages& stages);
 	bool Link(PipelineCache::Pipeline& pipeline, const GraphicsPipelineKey& key, const Stages& stages,
 	          bool ready_only = false);
+	void NotePreparedPipeline(const GraphicsPipelineKey& key, const Stages& stages);
 	void Prepare(const GraphicsPipelineKey& key, const Stages& stages, bool native);
 	void PrepareNow(const GraphicsPipelineKey& key, const Stages& stages, bool native);
 	void QueueOptimized(const PipelineCache::Pipeline& linked, const GraphicsPipelineKey& key,
@@ -93,6 +95,7 @@ private:
 	vk::Pipeline             Await(const std::shared_ptr<Library>& library);
 	void                     BuildIfQueued(const std::shared_ptr<Library>& library);
 	void                     Build(const std::shared_ptr<Library>& library);
+	bool                     SpeculationCovered(const GraphicsPipelineKey& key, const Stages& stages, bool native);
 	vk::PipelineLayout       LibraryLayout(const std::string& key, const GraphicsPipelineKey& pipeline_key,
 	                                       const Stages& stages, bool native);
 	void                     Worker();
@@ -106,6 +109,7 @@ private:
 	std::condition_variable                                                 m_available;
 	std::condition_variable                                                 m_done;
 	std::array<std::unordered_map<std::string, std::shared_ptr<Library>>, 4> m_parts;
+	std::unordered_set<std::string>                                          m_prepared_shader_states;
 	std::unordered_map<std::string, PipelineCache::Pipeline>                 m_layouts;
 	std::deque<std::shared_ptr<Library>>                                     m_queue;
 	bool                                                                     m_stopping = false;
@@ -126,6 +130,7 @@ private:
 	std::atomic<uint64_t>                m_wait_ns {0};
 	std::atomic<uint64_t>                m_ahead_requested {0};
 	std::atomic<uint64_t>                m_ahead_used {0};
+	std::atomic<uint64_t>                m_ahead_covered {0};
 	std::atomic<uint64_t>                m_claimed {0};
 	std::atomic<uint64_t>                m_failed {0};
 	std::atomic<uint64_t>                m_optimized_built {0};

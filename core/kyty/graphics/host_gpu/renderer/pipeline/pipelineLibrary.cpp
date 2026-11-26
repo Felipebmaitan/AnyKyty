@@ -98,6 +98,12 @@ std::string PartKey(PipelineLibraryPart part, const GraphicsPipelineKey& key,
 	return result;
 }
 
+std::string LibraryShaderStateKey(const GraphicsPipelineKey& key, const PipelineLibraries::Stages& stages) {
+	auto result = PartKey(PipelineLibraryPart::PreRasterization, key, stages, {});
+	result += PartKey(PipelineLibraryPart::FragmentShader, key, stages, {});
+	return result;
+}
+
 uint64_t Elapsed(std::chrono::steady_clock::time_point started) {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
 	                                 std::chrono::steady_clock::now() - started)
@@ -204,6 +210,22 @@ void PipelineLibraries::Stop() {
 
 bool PipelineLibraries::Eligible(const Stages& stages) {
 	return stages[0] != nullptr && stages[3] != nullptr;
+}
+
+void PipelineLibraries::NotePreparedPipeline(const GraphicsPipelineKey& key, const Stages& stages) {
+	if (!Eligible(stages)) return;
+	auto state = LibraryShaderStateKey(key, stages);
+	std::lock_guard lock(m_mutex);
+	m_prepared_shader_states.insert(std::move(state));
+}
+
+bool PipelineLibraries::SpeculationCovered(const GraphicsPipelineKey& key, const Stages& stages, bool native) {
+	if (native) return false;
+	const auto state = LibraryShaderStateKey(key, stages);
+	std::lock_guard lock(m_mutex);
+	if (!m_prepared_shader_states.contains(state)) return false;
+	m_ahead_covered.fetch_add(1, std::memory_order_relaxed);
+	return true;
 }
 
 vk::PipelineLayout PipelineLibraries::LibraryLayout(const std::string& key, const GraphicsPipelineKey& pipeline_key,
@@ -385,7 +407,7 @@ bool PipelineLibraries::Link(PipelineCache::Pipeline& pipeline, const GraphicsPi
 }
 
 void PipelineLibraries::Prepare(const GraphicsPipelineKey& key, const Stages& stages, bool native) {
-	if (!Eligible(stages)) {
+	if (!Eligible(stages) || SpeculationCovered(key, stages, native)) {
 		return;
 	}
 	const auto layout = LibraryLayout(GraphicsLayoutKey(stages, native), key, stages, native);
@@ -410,7 +432,7 @@ void PipelineLibraries::BuildIfQueued(const std::shared_ptr<Library>& library) {
 }
 
 void PipelineLibraries::PrepareNow(const GraphicsPipelineKey& key, const Stages& stages, bool native) {
-	if (!Eligible(stages)) {
+	if (!Eligible(stages) || SpeculationCovered(key, stages, native)) {
 		return;
 	}
 	const auto layout = LibraryLayout(GraphicsLayoutKey(stages, native), key, stages, native);
@@ -503,14 +525,14 @@ void PipelineLibraries::LogStats() {
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "[kyty-gpl] libraries built vi {} fo {} pr {} ({:.1f} ms avg) fs {} ({:.1f} ms avg); linked {} "
 	    "({:.3f} ms avg); waited {:.3f} s; ahead requested {} used {}; claimed {}; failed {}; whole in "
-	    "background {} ({:.1f} ms avg); built ahead {}\n",
+	    "background {} ({:.1f} ms avg); built ahead {}; ahead covered by prepared pipeline {}\n",
 	    built[0], built[3], built[1], avg_ms(build_ns[1], built[1]), built[2], avg_ms(build_ns[2], built[2]),
 	    linked, avg_ms(m_link_ns.load(std::memory_order_relaxed), linked),
 	    static_cast<double>(m_wait_ns.load(std::memory_order_relaxed)) / 1e9,
 	    m_ahead_requested.load(std::memory_order_relaxed), m_ahead_used.load(std::memory_order_relaxed),
 	    m_claimed.load(std::memory_order_relaxed), m_failed.load(std::memory_order_relaxed), optimized,
 	    avg_ms(m_optimized_ns.load(std::memory_order_relaxed), optimized),
-	    m_built_ahead.load(std::memory_order_relaxed)));
+	    m_built_ahead.load(std::memory_order_relaxed), m_ahead_covered.load(std::memory_order_relaxed)));
 }
 
 }
