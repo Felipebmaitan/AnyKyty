@@ -147,7 +147,7 @@ void DestroyRecycledImages(VmaAllocator allocator) {
 }
 
 static uint64_t MemoryBudgetCap() {
-	static const uint64_t cap = [] {
+	static const uint64_t cap = []() -> uint64_t {
 		const char* value = std::getenv("KYTY_MEMORY_BUDGET_MB");
 		if (value == nullptr || value[0] == '\0') {
 			return UINT64_MAX;
