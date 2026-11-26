@@ -2389,6 +2389,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	m_context.NoteFirstGuestCommand(false);
 	if (mesh_task) {
 		vk_buffer.drawMeshTasksEXT(emit.indirect.count, 1, 1);
 	} else if (mesh_active) {
@@ -2484,7 +2485,6 @@ struct TableNormalDraw {
 }
 
 bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args) {
-	m_context.NoteFirstGuestCommand(false);
 	KYTY_PROFILER_FUNCTION();
 	const TableNormalDraw table_normal {*this, args.indirect, true, TableCount::TableSampleStart()};
 
@@ -2585,7 +2585,6 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 }
 
 bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
-	m_context.NoteFirstGuestCommand(false);
 	KYTY_PROFILER_FUNCTION();
 	const TableNormalDraw table_normal {*this, args.indirect, false, TableCount::TableSampleStart()};
 

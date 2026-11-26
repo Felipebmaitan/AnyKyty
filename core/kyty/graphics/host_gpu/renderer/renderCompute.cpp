@@ -424,7 +424,6 @@ WaveSplitCheck& RenderExecutor::SplitCheck() {
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute) {
-	m_context.NoteFirstGuestCommand(true);
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -663,6 +662,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		}
 
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		m_context.NoteFirstGuestCommand(true);
 		constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
 		const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
 		                                   std::max(input_info.threads_num[1], 1u) *
@@ -792,7 +792,6 @@ struct IndirectThreadPass {
 
 void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t args_addr,
                                              uint32_t mode, bool async_compute) {
-	m_context.NoteFirstGuestCommand(true);
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) == 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
@@ -937,6 +936,7 @@ void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t arg
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	m_context.NoteFirstGuestCommand(true);
 	vk_buffer.dispatchIndirect(stream.Handle(), scratch_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
@@ -944,7 +944,6 @@ void RenderExecutor::DispatchIndirectThreads(CommandBuffer& buffer, uint64_t arg
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
                                       bool async_compute) {
-	m_context.NoteFirstGuestCommand(true);
 	EXIT_IF(args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
@@ -1033,6 +1032,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 			                          1, &barrier, 0, nullptr, 0, nullptr);
 		}
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		m_context.NoteFirstGuestCommand(true);
 		vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 		if (rt_pass == 1) {
