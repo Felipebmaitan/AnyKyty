@@ -2462,6 +2462,12 @@ bool EmptyBuffersServe(const ResourcePlan& program, const ResourceSnapshot& snap
 }
 #endif
 
+thread_local bool t_indirect_buffer_failure = false;
+
+bool IndirectBufferMaterializationFailed() {
+	return t_indirect_buffer_failure;
+}
+
 bool HasIndirectBuffers(const ResourcePlan& program) {
 	return std::ranges::any_of(program.info.buffers, [&](const BufferResource& buffer) {
 		return buffer.source < program.descriptor_sources.size() &&
@@ -2471,6 +2477,7 @@ bool HasIndirectBuffers(const ResourcePlan& program) {
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	t_indirect_buffer_failure = false;
 	t_record_blocks.clear();
 	for (auto& keys: PlanScratch(program).selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) {
@@ -2569,6 +2576,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	};
 	const auto resource_failed = [&](std::string_view kind, uint32_t resource, uint32_t source,
 	                                 size_t candidates) {
+		t_indirect_buffer_failure |= kind == "buffer";
 		return program_failed(fmt::format("indirect {} resource={} source={} candidates={}",
 		    kind, resource, source, candidates));
 	};

@@ -4517,7 +4517,9 @@ private:
 				if (inst.GetOpcode() == ValueOpcode::ImageSampleRaw) {
 					plan_handle(inst.Arg(1), 4u, memory.sampler * 4u, true);
 				}
-				if (m_runtime_buffer_descriptors && IndirectBufferAccess(inst)) continue;
+				if (m_runtime_buffer_descriptors && IndirectBufferAccess(inst) &&
+				    memory.SupportsIndirectBufferAccess(inst.GetOpcode()))
+					continue;
 				plan_handle(inst.Arg(0), IndirectBufferAccess(inst) ? 4u : 8u,
 				            memory.resource * 4u, false);
 			}

@@ -1707,6 +1707,15 @@ void PipelineCache::WidenComputeVariant(const ProgramKey& key, Program& program,
 #endif
 
 template <typename InputInfo>
+const ShaderModule* PipelineCache::GetRuntimeBufferProgram(const ShaderParams& params, InputInfo& input_info,
+                                                           uint32_t& push_data_cursor) {
+	m_runtime_buffers  = true;
+	const auto* module = GetProgram(params, input_info, push_data_cursor);
+	m_runtime_buffers  = false;
+	return module;
+}
+
+template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               uint32_t& push_data_cursor) {
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
@@ -1747,7 +1756,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	if (m_lane_pairs) {
 		m_lookup_key.static_state.push_back(LanePairsKey);
 	}
-	const bool runtime_buffers = m_runtime_buffer_programs.contains(params.hash);
+	const bool runtime_buffers = m_runtime_buffers;
 	if (runtime_buffers) {
 		m_lookup_key.static_state.push_back(RuntimeBuffersKey);
 	}
@@ -1759,16 +1768,18 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	};
 	bool       failed       = false;
 	bool       retry_runtime_buffers = false;
-	const auto skip_failure = [&]() KYTY_REQUIRES(m_program_lock) -> const ShaderModule* {
+	const auto skip_failure = [&](const ShaderRecompiler::IR::ResourcePlan& plan) KYTY_REQUIRES(m_program_lock)
+	    -> const ShaderModule* {
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
-			const auto found = m_program_cache.find(m_lookup_key);
-			if (!runtime_buffers && found != m_program_cache.end() &&
-			    ShaderRecompiler::IR::HasIndirectBuffers(found->second.resource_plan)) {
-				m_runtime_buffer_programs.insert(params.hash);
+			if (!runtime_buffers && ShaderRecompiler::IR::IndirectBufferMaterializationFailed() &&
+			    ShaderRecompiler::IR::HasIndirectBuffers(plan)) {
 				retry_runtime_buffers = true;
-				PipelineCacheLog("[kyty] compute shader 0x{:016x}: its buffer descriptors chosen in memory tables are "
-				                 "read at run time and its buffers reached by address",
-				                 params.hash);
+				if (m_runtime_buffer_logged.insert(params.hash).second) {
+					PipelineCacheLog("[kyty] compute shader 0x{:016x}: its buffer descriptors chosen in memory tables are "
+					                 "read at run time and its buffers reached by address when its candidates cannot be "
+					                 "bound",
+					                 params.hash);
+				}
 				return nullptr;
 			}
 		}
@@ -1832,8 +1843,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 #endif
 		}
 		if (failed) {
-			skip_failure();
-			return retry_runtime_buffers ? GetProgram(params, input_info, push_data_cursor) : nullptr;
+			skip_failure(cached.resource_plan);
+			return retry_runtime_buffers ? GetRuntimeBufferProgram(params, input_info, push_data_cursor) : nullptr;
 		}
 #if defined(ANYPS5_KYTY)
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
@@ -1959,14 +1970,14 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		auto& program = entry->second;
 		if (!ShaderRecompiler::IR::MaterializeResources(program.resource_plan, runtime,
 		                                                program.resources, program.specialization)) {
-			return skip_failure();
+			return skip_failure(program.resource_plan);
 		}
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data_cursor, failed)) {
 			return bind(*module);
 		}
-		if (failed) return skip_failure();
+		if (failed) return skip_failure(entry->second.resource_plan);
 	}
 #if defined(ANYPS5_KYTY)
 	entry->second.PromoteEmptyBuffers(entry->second.resources, entry->second.specialization, push_data_cursor);
@@ -1982,7 +1993,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	if (Common::Fallback::Run("draw or dispatch skipped: the shader recompiler stopped",
 	                          "PipelineCache::GetProgram", params.hash, 0,
 	                          [&]() KYTY_NO_THREAD_SAFETY_ANALYSIS { built = build(); })) {
-		if (retry_runtime_buffers) return GetProgram(params, input_info, push_data_cursor);
+		if (retry_runtime_buffers) return GetRuntimeBufferProgram(params, input_info, push_data_cursor);
 		return built;
 	}
 	if (const auto found = m_program_cache.find(m_lookup_key); found != m_program_cache.end()) {

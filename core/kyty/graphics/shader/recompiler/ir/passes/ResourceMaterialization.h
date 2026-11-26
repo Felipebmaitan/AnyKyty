@@ -77,6 +77,7 @@ bool LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan);
 void SetComputeIndirectFloors(size_t keys, size_t images);
 
 bool HasIndirectBuffers(const ResourcePlan& program);
+bool IndirectBufferMaterializationFailed();
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 

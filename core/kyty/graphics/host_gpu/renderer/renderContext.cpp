@@ -1091,6 +1091,7 @@ void RenderContext::PrepareBda(bool may_write, bool full_sync) {
 	m_buffer_cache.PrepareFaultBuffer();
 	if (may_write) {
 		m_buffer_cache.NoteDeviceAddressUse();
+		m_indirect_write_tables.NotePendingWrites();
 	}
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	const std::array<uint64_t, 3> epochs {RegionManager::CpuDirtyEpoch(),
