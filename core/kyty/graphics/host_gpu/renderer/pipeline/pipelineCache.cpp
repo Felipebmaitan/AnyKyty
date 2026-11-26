@@ -576,7 +576,7 @@ void SkipCallExpansionFailure(uint64_t hash, const ShaderRecompiler::ShaderSourc
 }
 
 void AppendNativeRayTracingKey(ShaderType stage, std::vector<uint32_t>& key, bool native) {
-	if (!Config::RayTracingEmulation() && (stage == ShaderType::Compute || stage == ShaderType::Pixel)) {
+	if (!Config::RayTracingEmulation()) {
 		key.push_back(0x5254454du);
 	}
 	if (native && stage == ShaderType::Pixel && RayTracing::NativeTraversals() && Config::RayTracingOracle() != 0) {
@@ -3651,6 +3651,7 @@ void PipelineCache::RunTableJob(CompileJob& job, InputInfo& input_info) {
 		options.dump_ir            = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
 		options.emit_debug_info    = Config::GraphicsDebugDumpEnabled();
 		options.native_ray_tracing = false;
+		options.rt_emulation       = Config::RayTracingEmulation();
 		options.table_mode         = true;
 		auto source = ShaderRecompiler::PrepareShaderSource(job.params.code, options);
 		if (!source.calls.empty() || source.unsupported_call_pc != UINT32_MAX) {

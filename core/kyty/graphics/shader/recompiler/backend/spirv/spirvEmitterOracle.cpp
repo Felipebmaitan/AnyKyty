@@ -31,7 +31,7 @@ constexpr uint32_t ContextFlags     = 76;
 constexpr uint32_t SlotBlas         = 40;
 constexpr uint32_t SlotRoot         = 48;
 constexpr uint32_t OracleFlags      = IR::BvhIntersectNative | IR::BvhIntersectOracle | IR::BvhIntersectOracleLane |
-                                      IR::BvhIntersectEmpty;
+                                      IR::BvhIntersectEmpty | IR::BvhIntersectStrict;
 
 struct Call {
 	uint32_t descriptor = 0;

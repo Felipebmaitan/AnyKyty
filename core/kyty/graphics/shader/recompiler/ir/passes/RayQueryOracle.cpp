@@ -146,6 +146,21 @@ Block* InnermostLoop(const Program& program, const Block* block) {
 	return nullptr;
 }
 
+bool LeaveAfter(Block& exit, Block& stay, Value next, uint32_t limit) {
+	auto& term = exit.terminator;
+	if (exit.condition.IsEmpty() || term.kind != CFG::TerminatorKind::ConditionalBranch) return false;
+	const bool stay_on_true = term.true_block == &stay;
+	if (!stay_on_true && term.false_block != &stay) return false;
+	auto& under = *exit.PrependNewInst(exit.end(), ValueOpcode::ULessThan32, {next, Value(limit)});
+	if (stay_on_true) {
+		exit.condition = Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalAnd, {exit.condition, Value(&under)}));
+	} else {
+		auto& over     = *exit.PrependNewInst(exit.end(), ValueOpcode::LogicalNot, {Value(&under)});
+		exit.condition = Value(&*exit.PrependNewInst(exit.end(), ValueOpcode::LogicalOr, {exit.condition, Value(&over)}));
+	}
+	return true;
+}
+
 bool BoundLoop(Program& program, Block& header, uint32_t limit) {
 	const auto first = BlockAt(program, &header);
 	const auto last  = BlockAt(program, header.terminator.continue_block);
@@ -156,12 +171,37 @@ bool BoundLoop(Program& program, Block& header, uint32_t limit) {
 		if (latch != nullptr) return false;
 		latch = pred;
 	}
-	if (latch == nullptr || latch->condition.IsEmpty() ||
-	    latch->terminator.kind != CFG::TerminatorKind::ConditionalBranch) {
-		return false;
+	if (latch == nullptr) return false;
+	Block* exit = nullptr;
+	Block* stay = nullptr;
+	if (latch->terminator.kind == CFG::TerminatorKind::ConditionalBranch &&
+	    (latch->terminator.true_block == &header || latch->terminator.false_block == &header)) {
+		exit = latch;
+		stay = &header;
+	} else {
+		auto* merge = header.terminator.merge_block;
+		auto* at    = &header;
+		for (size_t steps = 0; at != nullptr && at != latch && steps <= last - first; ++steps) {
+			const auto index = BlockAt(program, at);
+			if (index < first || index > last) break;
+			const auto& term = at->terminator;
+			if (term.kind == CFG::TerminatorKind::Branch) {
+				at = at != &header && term.loop_header && term.merge_block != nullptr ? term.merge_block : term.true_block;
+				continue;
+			}
+			if (term.kind != CFG::TerminatorKind::ConditionalBranch) break;
+			if (term.true_block != merge && term.false_block != merge && term.merge_block != nullptr &&
+			    (term.loop_header || BlockAt(program, term.merge_block) > index)) {
+				at = term.merge_block;
+				continue;
+			}
+			if (term.true_block == merge) stay = term.false_block;
+			if (term.false_block == merge) stay = term.true_block;
+			if (stay != nullptr && stay != merge) exit = at;
+			break;
+		}
 	}
-	const bool repeat_on_true = latch->terminator.true_block == &header;
-	if (!repeat_on_true && latch->terminator.false_block != &header) return false;
+	if (exit == nullptr || stay == nullptr || exit->condition.IsEmpty()) return false;
 	auto& count = *header.PrependNewInst(header.begin(), ValueOpcode::Phi);
 	count.SetFlags(Type::U32);
 	const auto body = std::ranges::find_if(header, [](const Inst& inst) { return inst.GetOpcode() != ValueOpcode::Phi; });
@@ -169,14 +209,20 @@ bool BoundLoop(Program& program, Block& header, uint32_t limit) {
 	for (auto* pred: header.ImmPredecessors()) {
 		count.AddPhiOperand(pred, pred == latch ? Value(&next) : Value(0u));
 	}
-	auto& under = *latch->PrependNewInst(latch->end(), ValueOpcode::ULessThan32, {Value(&next), Value(limit)});
-	if (repeat_on_true) {
-		latch->condition = Value(&*latch->PrependNewInst(latch->end(), ValueOpcode::LogicalAnd, {latch->condition, Value(&under)}));
-	} else {
-		auto& over       = *latch->PrependNewInst(latch->end(), ValueOpcode::LogicalNot, {Value(&under)});
-		latch->condition = Value(&*latch->PrependNewInst(latch->end(), ValueOpcode::LogicalOr, {latch->condition, Value(&over)}));
-	}
-	return true;
+	return LeaveAfter(*exit, *stay, Value(&next), limit);
+}
+
+bool Unserved(const Inst& inst) {
+	const auto op = inst.GetOpcode();
+	if (op == ValueOpcode::Bvh8Intersect) return (inst.Flags<uint32_t>() & BvhIntersectEmpty) != 0;
+	return op == ValueOpcode::BvhIntersect &&
+	       (inst.Flags<uint32_t>() & (BvhIntersectEmpty | BvhIntersectNative)) == BvhIntersectEmpty;
+}
+
+bool NativeWork(const Inst& inst) {
+	const auto op = inst.GetOpcode();
+	return op == ValueOpcode::RayQueryProceed ||
+	       (op == ValueOpcode::BvhIntersect && (inst.Flags<uint32_t>() & BvhIntersectNative) != 0);
 }
 
 }
@@ -185,32 +231,44 @@ size_t MarkWalksEmpty(Program& program) {
 	size_t marked = 0;
 	for (auto* block: program.blocks) {
 		for (auto& inst: *block) {
-			if (inst.GetOpcode() != ValueOpcode::BvhIntersect) continue;
 			const auto flags = inst.Flags<uint32_t>();
-			if ((flags & BvhIntersectEmpty) != 0) continue;
-			inst.SetFlags((flags & ~BvhIntersectOracle & ~BvhIntersectOracleLane) | BvhIntersectEmpty);
-			marked += (flags & BvhIntersectNative) == 0 ? 1u : 0u;
+			if (inst.GetOpcode() == ValueOpcode::Bvh8Intersect) {
+				inst.SetFlags(flags | BvhIntersectEmpty);
+				++marked;
+				continue;
+			}
+			if (inst.GetOpcode() != ValueOpcode::BvhIntersect) continue;
+			inst.SetFlags((flags & ~BvhIntersectOracle & ~BvhIntersectOracleLane) | BvhIntersectEmpty | BvhIntersectStrict);
+			marked += (flags & (BvhIntersectNative | BvhIntersectEmpty)) == 0 ? 1u : 0u;
 		}
 	}
 	return marked;
 }
 
-size_t BoundEmptyWalks(Program& program, uint32_t limit) {
+EmptyWalkBounds BoundEmptyWalks(Program& program, uint32_t limit, uint32_t native_limit) {
 	std::vector<Block*> headers;
 	for (auto* block: program.blocks) {
 		for (const auto& inst: *block) {
-			if (inst.GetOpcode() != ValueOpcode::BvhIntersect) continue;
-			const auto flags = inst.Flags<uint32_t>();
-			if ((flags & BvhIntersectEmpty) == 0 || (flags & BvhIntersectNative) != 0) continue;
+			if (!Unserved(inst)) continue;
 			auto* header = InnermostLoop(program, block);
 			if (header != nullptr && std::ranges::find(headers, header) == headers.end()) headers.push_back(header);
 		}
 	}
-	size_t bounded = 0;
+	EmptyWalkBounds bounds;
 	for (auto* header: headers) {
-		bounded += BoundLoop(program, *header, limit) ? 1u : 0u;
+		const auto first  = BlockAt(program, header);
+		const auto last   = BlockAt(program, header->terminator.continue_block);
+		bool       native = false;
+		for (auto at = first; at <= last && !native; ++at) {
+			native = std::ranges::any_of(*program.blocks[at], NativeWork);
+		}
+		if (BoundLoop(program, *header, native ? native_limit : limit)) {
+			++(native ? bounds.native : bounds.empty);
+		} else {
+			++bounds.refused;
+		}
 	}
-	return bounded;
+	return bounds;
 }
 
 size_t MarkEmptyWalk(const Program& program, std::span<Inst* const> intersections, const NativeTraversalOptions& options) {

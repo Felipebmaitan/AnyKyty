@@ -44,7 +44,8 @@ namespace Libs::Graphics::ShaderRecompiler {
 
 namespace {
 
-constexpr uint32_t EmptyWalkIterations = 4096;
+constexpr uint32_t EmptyWalkIterations       = 4096;
+constexpr uint32_t EmptyWalkNativeIterations = 65536;
 
 std::string MakeIrDump(std::string_view cfg, const IR::Program& ir) {
 	std::string dump = "CFG:\n";
@@ -719,6 +720,9 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	const bool bvh = std::ranges::any_of(decoded.instructions, [](const auto& inst) {
 		return inst.opcode == Decoder::Opcode::IMAGE_BVH_INTERSECT_RAY;
 	});
+	const bool bvh8 = std::ranges::any_of(decoded.instructions, [](const auto& inst) {
+		return inst.opcode == Decoder::Opcode::IMAGE_BVH8_INTERSECT_RAY;
+	});
 	constexpr uint32_t pixel_oracle = IR::OracleRemaining | IR::OraclePixel;
 	const uint32_t     rt_oracle    = !options.native_ray_tracing ? 0u
 	                                  : options.rt_emulation || (options.rt_oracle & IR::OracleRemaining) == 0
@@ -774,11 +778,16 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			NoteRayTracingProgram(RayTracingProgramKind::Native, options.shader_hash);
 		}
 	}
-	if (bvh) {
+	if (bvh || (bvh8 && !options.rt_emulation)) {
 		if (!options.rt_emulation) IR::MarkWalksEmpty(ir);
 		size_t intersections = 0, empty = 0;
 		for (const auto* block: ir.blocks) {
 			for (const auto& inst: *block) {
+				if (inst.GetOpcode() == IR::ValueOpcode::Bvh8Intersect && !options.rt_emulation) {
+					++intersections;
+					++empty;
+					continue;
+				}
 				if (inst.GetOpcode() != IR::ValueOpcode::BvhIntersect) continue;
 				++intersections;
 				const auto flags = inst.Flags<uint32_t>();
@@ -878,9 +887,12 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 	}
 
 	if (!options.rt_emulation) {
-		if (const auto bounded = IR::BoundEmptyWalks(ir, EmptyWalkIterations); bounded != 0) {
-			LOGF("ShaderRecompiler %s empty BVH walks bounded: hash=0x%016" PRIx64 " loops=%zu iterations=%u\n", stage,
-			     ir.shader_hash, bounded, EmptyWalkIterations);
+		const auto bounds = IR::BoundEmptyWalks(ir, EmptyWalkIterations, EmptyWalkNativeIterations);
+		if (bounds.empty + bounds.native + bounds.refused != 0) {
+			LOGF("ShaderRecompiler %s empty BVH walks bounded: hash=0x%016" PRIx64 " loops=%zu after %u iterations, %zu with "
+			     "native work after %u, %zu left unbounded\n",
+			     stage, ir.shader_hash, bounds.empty, EmptyWalkIterations, bounds.native, EmptyWalkNativeIterations,
+			     bounds.refused);
 		}
 	}
 	IR::CollectShaderInfo(ir, options.input_info);
