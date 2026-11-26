@@ -1613,9 +1613,13 @@ const char* PipelineStateName(uint32_t state) {
 }
 
 uint32_t PipelineCache::ComputePipelineState(const ShaderModule& module) {
-	if (m_compute_pipelines.contains(module.id)) return 2u;
+	const auto ready = [&](const auto& pipelines) {
+		const auto found = pipelines.find(module.id);
+		return found != pipelines.end() && found->second.pipeline && found->second.pipeline_layout;
+	};
+	if (ready(m_compute_pipelines)) return 2u;
 	std::lock_guard lock(m_async_mutex);
-	if (m_async_ready_compute.contains(module.id)) return 2u;
+	if (ready(m_async_ready_compute)) return 2u;
 	return m_async_pending_compute.contains(module.id) ? 1u : 0u;
 }
 
@@ -1663,12 +1667,10 @@ ShaderModule* PipelineCache::ServeComputeVariant(Program& program, uint32_t push
 		best_slots = slots;
 	}
 	if (best == nullptr) return nullptr;
-	ShaderRecompiler::IR::ResourceSnapshot aligned;
 	if (!ShaderRecompiler::IR::AlignResources(plan, program.resources, program.specialization, best->specialization,
-	                                          &aligned)) {
+	                                          &program.resources)) {
 		return nullptr;
 	}
-	program.resources     = std::move(aligned);
 	program.served_module = best_index;
 	if (ShaderVariantLog()) {
 		const auto natural = ResourceShapeFingerprint(program.specialization);
@@ -1693,7 +1695,7 @@ void PipelineCache::SpecializeComputeVariant(const ProgramKey& key, Program& pro
 	    program.Failed(specialization, push_data_cursor)) {
 		return;
 	}
-	QueueCompile(key, params, input_info, push_data_cursor, &specialization, m_guest_traversal);
+	QueueCompile(key, params, input_info, push_data_cursor, &specialization, m_guest_traversal, false, false, true);
 	if (ShaderVariantLog()) {
 		PipelineCacheLog("[kyty-variant] specialize stage=CS shader={:016x} natural={:016x} @{}", params.hash,
 		                 ResourceShapeFingerprint(specialization),
@@ -1857,9 +1859,12 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			const bool generic = specialized && !m_queue_only && ShaderRecompiler::IR::GenericComputeVariants();
 			if (generic && module != nullptr && ComputePipelineState(*module) != 2u) {
-				if (auto* served = ServeComputeVariant(cached, push_data_cursor, module, 2u)) return bind(*served);
+				if (auto* served = ServeComputeVariant(cached, push_data_cursor, module, 2u)) {
+					CreateComputePipelineAhead(*module);
+					return bind(*served);
+				}
 			} else if (generic && module == nullptr) {
-				if (auto* served = ServeComputeVariant(cached, push_data_cursor, nullptr, 0u)) {
+				if (auto* served = ServeComputeVariant(cached, push_data_cursor, nullptr, 2u)) {
 					SpecializeComputeVariant(entry->first, cached, params, input_info, cached.specialization,
 					                         push_data_cursor);
 					return bind(*served);
@@ -2031,8 +2036,8 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 
 PipelineCache::PipelineCache(GraphicContext&                         graphics,
                              ShaderRecompiler::IR::ImageHeapSource* image_heap,
-                             const std::filesystem::path&           shader_store)
-    : m_graphics(graphics), m_image_heap(image_heap),
+                             const std::filesystem::path&           shader_store, bool compile_compute_pipelines)
+    : m_graphics(graphics), m_image_heap(image_heap), m_compile_compute_pipelines(compile_compute_pipelines),
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	const bool driver_cache_restored = InitializeDriverCache();
@@ -2964,6 +2969,8 @@ const ShaderModule* PipelineCache::GetAhead(const ShaderParams& params, InputInf
 }
 
 struct PipelineCache::CompileJob {
+	std::vector<uint32_t>                                       code;
+	std::vector<uint32_t>                                       back_code;
 	ProgramKey                                                  key;
 	ShaderParams                                                params;
 	std::unique_ptr<ShaderVertexInputInfo>                      vertex;
@@ -3004,7 +3011,7 @@ void PipelineCache::QueueCompile(const ProgramKey& key, const ShaderParams& para
                                  const InputInfo&                                    input_info,
                                  uint32_t                                            push_data_cursor,
                                  const ShaderRecompiler::IR::ResourceSpecialization* specialization,
-                                 bool guest_traversal, bool speculative, bool lane_pairs) {
+                                 bool guest_traversal, bool speculative, bool lane_pairs, bool own_source) {
 	if (m_in_flight.contains(key)) {
 		return;
 	}
@@ -3017,6 +3024,12 @@ void PipelineCache::QueueCompile(const ProgramKey& key, const ShaderParams& para
 	job->lane_pairs       = lane_pairs;
 	if (specialization != nullptr) {
 		job->specialization = *specialization;
+	}
+	if (own_source) {
+		job->code.assign(params.code.begin(), params.code.end());
+		job->back_code.assign(params.back_code.begin(), params.back_code.end());
+		job->params.code = job->code;
+		job->params.back_code = job->back_code;
 	}
 	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 		job->vertex = std::make_unique<ShaderVertexInputInfo>(input_info);
@@ -4656,6 +4669,27 @@ void PipelineCache::PrepareGraphicsLibraries(const HW::Context& context, const H
 	m_libraries->Prepare(key, stages, false);
 }
 #endif
+
+bool PipelineCache::GetGenericCheckStage(const ShaderStageRuntime& exact, ShaderStageRuntime& generic,
+                                         ShaderRecompiler::IR::ResourceSnapshot& aligned) {
+#if defined(ANYPS5_KYTY)
+	const auto& module = *exact.module;
+	const ProgramLockGuard lock(m_program_lock);
+	if (module.plan == nullptr || !m_baked_stride_programs.contains(module.info.shader_hash) ||
+	    ComputePipelineState(module) != 2u) return false;
+	for (auto& [key, program]: m_program_cache) {
+		if (&program.resource_plan != module.plan || program.call_source || program.served_module >= program.modules.size()) continue;
+		const auto& served = program.modules[program.served_module];
+		if (&served == &module || module.specialization != program.specialization ||
+		    ComputePipelineState(served) != 2u || served.info.bindings.push_data_start_dword != module.info.bindings.push_data_start_dword ||
+		    !ShaderRecompiler::IR::AlignResources(*module.plan, *exact.resources, module.specialization, served.specialization,
+		                                         &aligned)) return false;
+		generic = {.module = &served, .resources = &aligned};
+		return true;
+	}
+#endif
+	return false;
+}
 
 PipelineCache::Pipeline* PipelineCache::TryGetComputePipeline(const ShaderComputeInputInfo& input_info) {
 	const auto& module = *input_info.stage.module;

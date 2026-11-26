@@ -448,7 +448,7 @@ class LinkedComputeStore;
 class PipelineCache {
 public:
 	PipelineCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap,
-	              const std::filesystem::path& shader_store = {});
+	              const std::filesystem::path& shader_store = {}, bool compile_compute_pipelines = true);
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
@@ -514,6 +514,8 @@ public:
 	                              const DrawRenderState& state);
 #endif
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
+	bool GetGenericCheckStage(const ShaderStageRuntime& exact, ShaderStageRuntime& generic,
+	                          ShaderRecompiler::IR::ResourceSnapshot& aligned);
 	Pipeline* TryGetComputePipeline(const ShaderComputeInputInfo& input_info);
 	[[nodiscard]] const std::shared_ptr<const std::atomic<bool>>& PipelineWaiting() const {
 		return m_pipeline_waiting;
@@ -619,6 +621,7 @@ private:
 #endif
 	GraphicContext&                        m_graphics;
 	ShaderRecompiler::IR::ImageHeapSource* m_image_heap;
+	const bool m_compile_compute_pipelines;
 	std::unordered_map<ProgramKey, Program, ProgramKeyHash> m_program_cache KYTY_GUARDED_BY(m_program_lock);
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
 	ProgramKey                             m_lookup_key KYTY_GUARDED_BY(m_program_lock);
@@ -706,7 +709,8 @@ private:
 	                  const ShaderRecompiler::IR::ResourceSpecialization* specialization,
 	                  bool                                                guest_traversal = false,
 	                  bool                                                speculative     = false,
-	                  bool                                                lane_pairs      = false)
+	                  bool                                                lane_pairs      = false,
+	                  bool                                                own_source      = false)
 	    KYTY_REQUIRES(m_program_lock);
 	bool WaitForCompile(const ProgramKey& key) KYTY_REQUIRES(m_program_lock);
 	template <typename InputInfo>
@@ -941,6 +945,8 @@ private:
 		uint32_t startup_done    = 0;
 		bool     memory_paused   = false;
 		uint64_t modules_done    = 0;
+		uint64_t modules_total   = 0;
+		uint64_t failures        = 0;
 		uint64_t pipelines_done  = 0;
 		uint32_t threads         = 0;
 		double   module_seconds   = 0.0;

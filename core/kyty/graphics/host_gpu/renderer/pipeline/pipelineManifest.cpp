@@ -649,7 +649,12 @@ void PipelineCache::OpenManifest() {
 	if (!assets.empty()) folders.push_back(assets);
 	folders.emplace_back("_PipelineCache");
 	const auto shared_path = folders.back() / (stem + ".shared.kpm");
-	const auto files = FindManifestFiles(folders, title, name, shared_path);
+	auto files = FindManifestFiles(folders, title, name, shared_path);
+	const auto compute_path = folders.back() / (stem + ".compute.kpm");
+	if (Common::File::IsFileExisting(compute_path) &&
+	    std::ranges::find(files, compute_path) == files.end()) {
+		files.push_back(compute_path);
+	}
 
 	m_manifest.reset(new ManifestState());
 	auto& state = *m_manifest;
@@ -676,11 +681,17 @@ void PipelineCache::OpenManifest() {
 			const auto start = std::chrono::steady_clock::now();
 			file.read = LoadManifest(ReadFile(files[i]), file.manifest, &file.skipped, &file.unlinked);
 			file.time = std::chrono::steady_clock::now() - start;
-			if (file.read) {
+			if (file.read && files[i] != compute_path) {
 				manifests.push_back(&file.manifest);
 			}
 		}
 		DecideRuntimeStrides(manifests);
+		if (const auto found = std::ranges::find(files, compute_path); found != files.end()) {
+			const auto& generic = read_files[found - files.begin()];
+			for (const auto& module: generic.manifest.modules) {
+				if (module.stage == ShaderType::Compute) m_baked_stride_programs.insert(module.ProgramHash());
+			}
+		}
 	}
 	for (const auto& path: files) {
 		auto&      file     = read_files[static_cast<size_t>(&path - files.data())];
@@ -3078,6 +3089,7 @@ void PipelineCache::CreateManifestGraphicsPipeline(const GraphicsPipelineKey& ke
 }
 
 void PipelineCache::CreateManifestComputePipeline(const ShaderModule& module, bool from_assets, const std::stop_token& stop) {
+	if (!m_compile_compute_pipelines) return;
 #if defined(ANYPS5_KYTY)
 	std::atomic_ref<bool>(module.pipeline_requested).store(true, std::memory_order_relaxed);
 #endif
@@ -3144,6 +3156,8 @@ PipelineCache::ManifestBacklog PipelineCache::GetManifestBacklog() const {
 		backlog.compute_modules += state.warm_modules[index].stage == ShaderType::Compute ? 1u : 0u;
 	}
 	backlog.modules_done     = state.built + state.found + state.failed;
+	backlog.modules_total    = state.warm_modules.size();
+	backlog.failures         = state.failed + state.pipelines_failed + state.dropped.load(std::memory_order_relaxed);
 	backlog.pipelines_done   = state.pipelines + state.pipelines_known + state.pipelines_failed;
 	backlog.threads          = static_cast<uint32_t>(state.threads.size());
 	backlog.module_seconds   = state.module_time.Get();

@@ -3450,7 +3450,6 @@ bool AlignResources(const ResourcePlan& program, const ResourceSnapshot& snapsho
                     const ResourceSpecialization& specialization, const ResourceSpecialization& target,
                     ResourceSnapshot* aligned) {
 	if (!GenericComputeVariants() || program.stage != ShaderType::Compute ||
-	    !g_stable_indirect_layouts.load(std::memory_order_relaxed) || !snapshot.image_tables.empty() ||
 	    specialization.buffers.size() != target.buffers.size() ||
 	    snapshot.buffers.size() != specialization.buffers.size() ||
 	    snapshot.images.size() != specialization.images.size() ||
@@ -3460,12 +3459,21 @@ bool AlignResources(const ResourcePlan& program, const ResourceSnapshot& snapsho
 	for (uint32_t index = 0; index < specialization.buffers.size(); ++index) {
 		const auto& wanted = specialization.buffers[index];
 		const auto& served = target.buffers[index];
-		if (wanted.indirect_root != BufferResource::NoIndirectBuffer ||
-		    served.indirect_root != BufferResource::NoIndirectBuffer ||
-		    (!(wanted == served) && !EmptyBufferServes(program, snapshot, index, wanted, served))) {
+		auto compatible = wanted;
+		if (HasRuntimeStride(served.packed_stride) && ReadsStrideAtRunTime(program, index, wanted)) {
+			compatible.packed_stride |= RuntimeBufferStride;
+		}
+		if (!(compatible == served) &&
+		    (wanted.indirect_root != BufferResource::NoIndirectBuffer || served.indirect_root != BufferResource::NoIndirectBuffer ||
+		     !EmptyBufferServes(program, snapshot, index, wanted, served))) {
 			return false;
 		}
 	}
+	if (specialization.images == target.images && specialization.samplers == target.samplers) {
+		if (aligned != nullptr && aligned != &snapshot) *aligned = snapshot;
+		return true;
+	}
+	if (!g_stable_indirect_layouts.load(std::memory_order_relaxed) || !snapshot.image_tables.empty()) return false;
 	std::vector<RootShape> images_from, images_to, samplers_from, samplers_to;
 	std::vector<uint8_t>   deferred_from, deferred_to;
 	if (!ImageShapes(program, specialization.images, images_from, deferred_from) ||

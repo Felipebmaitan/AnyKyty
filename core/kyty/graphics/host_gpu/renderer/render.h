@@ -202,6 +202,8 @@ public:
 	                             bool async_compute);
 	RayTracingCheck& RtCheck();
 	WaveSplitCheck&  SplitCheck();
+	bool BeginGenericCheck(const ShaderComputeInputInfo& exact, const CommandBuffer& buffer,
+	                       ShaderComputeInputInfo& generic, ShaderRecompiler::IR::ResourceSnapshot& aligned);
 
 	struct ResolvedDraw;
 	[[nodiscard]] ResolvedDraw* ResolveDrawAhead(const HW::Context&    context,
@@ -600,6 +602,7 @@ private:
 	PreparedBindings                     m_compute_bindings;
 	std::shared_ptr<RayTracingCheck>     m_rt_check;
 	std::shared_ptr<WaveSplitCheck>      m_split_check;
+	std::shared_ptr<WaveSplitCheck>      m_generic_check;
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;

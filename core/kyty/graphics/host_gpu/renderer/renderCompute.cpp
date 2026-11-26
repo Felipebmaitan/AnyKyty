@@ -436,6 +436,20 @@ WaveSplitCheck& RenderExecutor::SplitCheck() {
 	return *m_split_check;
 }
 
+bool RenderExecutor::BeginGenericCheck(const ShaderComputeInputInfo& exact, const CommandBuffer& buffer,
+                                       ShaderComputeInputInfo& generic, ShaderRecompiler::IR::ResourceSnapshot& aligned) {
+	static const bool enabled = [] {
+		const char* setting = std::getenv("KYTY_GENERIC_COMPUTE_CHECK");
+		return setting != nullptr && std::string_view(setting) == "1";
+	}();
+	if (!enabled) return false;
+	if (!m_generic_check) m_generic_check = std::make_shared<WaveSplitCheck>(m_context, true);
+	generic = exact;
+	return m_context.GetPipelineCache().GetGenericCheckStage(exact.stage, generic.stage, aligned) &&
+	       m_generic_check->Sample(*exact.stage.module, exact, buffer) &&
+	       m_generic_check->Begin(*generic.stage.module, *exact.stage.module);
+}
+
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
                                     uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode,
                                     bool async_compute) {
@@ -600,6 +614,12 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		    PrepareNativeRayTracing(m_context, vk_buffer, cs_regs, bindings, rt_pass == 1, rt_pass != 2 && !fell_back);
 		if (rt_pass == 1) {
 			RtCheck().Before(bindings);
+		} else if (rt_pass == 5) {
+			m_generic_check->Before(bindings);
+			if (!m_generic_check->Active()) {
+				ResetBindings();
+				return;
+			}
 		} else if (rt_pass == 3) {
 			SplitCheck().Before(bindings);
 		}
@@ -676,6 +696,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			}
 		}
 
+		if (rt_pass == 5 || rt_pass == 6) m_generic_check->Timestamp(vk_buffer, rt_pass == 5 ? 0 : 2);
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 		m_context.NoteFirstGuestCommand(true);
 		constexpr uint32_t DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE = 1u << 3u;
@@ -697,6 +718,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 		} else {
 			vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 		}
+		if (rt_pass == 5 || rt_pass == 6) m_generic_check->Timestamp(vk_buffer, rt_pass == 5 ? 1 : 3);
 		NoteLinkedDispatch(*input_info.stage.module, pipeline);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 		if (rt_pass == 1) {
@@ -707,12 +729,23 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			SplitCheck().AfterSplit(bindings);
 		} else if (rt_pass == 4) {
 			SplitCheck().AfterPairs(bindings);
+		} else if (rt_pass == 5) {
+			m_generic_check->AfterSplit(bindings);
+		} else if (rt_pass == 6) {
+			m_generic_check->AfterPairs(bindings);
 		}
 
 		m_deferred_barrier       = true;
 		m_deferred_barrier_queue = m_guest_queue;
 		ResetBindings();
 	};
+	ShaderComputeInputInfo generic;
+	ShaderRecompiler::IR::ResourceSnapshot aligned;
+	if (BeginGenericCheck(input_info, buffer, generic, aligned)) {
+		record(generic, 5);
+		record(input_info, m_generic_check->Active() ? 6 : 0);
+		return;
+	}
 	if (RtCheck().Sample(*compute_module, buffer)) {
 		const auto             hash   = compute_module->info.shader_hash;
 		ShaderComputeInputInfo guest  = pristine;
@@ -1026,6 +1059,12 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		                                             rt_pass != 2 && !fell_back);
 		if (rt_pass == 1) {
 			RtCheck().Before(bindings);
+		} else if (rt_pass == 5) {
+			m_generic_check->Before(bindings);
+			if (!m_generic_check->Active()) {
+				ResetBindings();
+				return;
+			}
 		}
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
@@ -1049,19 +1088,32 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 			                          1, &barrier, 0, nullptr, 0, nullptr);
 		}
 		vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+		if (rt_pass == 5 || rt_pass == 6) m_generic_check->Timestamp(vk_buffer, rt_pass == 5 ? 0 : 2);
 		m_context.NoteFirstGuestCommand(true);
 		vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 		NoteLinkedDispatch(*input_info.stage.module, pipeline);
+		if (rt_pass == 5 || rt_pass == 6) m_generic_check->Timestamp(vk_buffer, rt_pass == 5 ? 1 : 3);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 		if (rt_pass == 1) {
 			RtCheck().AfterOracle(bindings, counted);
 		} else if (rt_pass == 2) {
 			RtCheck().AfterGuest(bindings);
+		} else if (rt_pass == 5) {
+			m_generic_check->AfterSplit(bindings);
+		} else if (rt_pass == 6) {
+			m_generic_check->AfterPairs(bindings);
 		}
 		m_deferred_barrier       = true;
 		m_deferred_barrier_queue = m_guest_queue;
 		ResetBindings();
 	};
+	ShaderComputeInputInfo generic;
+	ShaderRecompiler::IR::ResourceSnapshot aligned;
+	if (BeginGenericCheck(input_info, buffer, generic, aligned)) {
+		record(generic, 5);
+		record(input_info, m_generic_check->Active() ? 6 : 0);
+		return;
+	}
 	if (RtCheck().Sample(*compute_module, buffer)) {
 		const auto             hash   = compute_module->info.shader_hash;
 		ShaderComputeInputInfo guest  = pristine;

@@ -272,7 +272,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 		});
 	}
 	for (const auto* module: modules | std::views::values) {
-		if (module != nullptr && module->info.stage == ShaderType::Compute) {
+		if (m_compile_compute_pipelines && module != nullptr && module->info.stage == ShaderType::Compute) {
 			module->pipeline_requested = true;
 			auto& pipeline = m_compute_pipelines[module->id];
 			if (!lookup || !FindComputePipeline(m_graphics, pipeline, *module, m_driver_cache)) {
@@ -329,7 +329,7 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 		});
 	}
 	for (const auto* module: modules | std::views::values) {
-		if (module != nullptr && module->info.stage == ShaderType::Compute) {
+		if (m_compile_compute_pipelines && module != nullptr && module->info.stage == ShaderType::Compute) {
 			jobs.emplace_back([this, module, &pipeline = m_compute_pipelines[module->id]] {
 				CreatePipelineInternal(m_graphics, pipeline, *module, m_driver_cache);
 			});
