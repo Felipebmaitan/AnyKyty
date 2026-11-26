@@ -902,17 +902,19 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 }
             }
 
+#if defined(ANYPS5_KYTY)
+            std::optional<std::string> startupStatus;
+            if (startupTitleChanged.exchange(false, std::memory_order_acq_rel)) {
+                std::lock_guard lock(mutex);
+                startupStatus = startupTitle;
+            }
+#endif
             const bool quit = OnMainThread([&] {
 #if defined(ANYPS5_KYTY)
-                if (startupTitleChanged.exchange(false, std::memory_order_acq_rel)) {
-                    std::string status;
-                    {
-                        std::lock_guard lock(mutex);
-                        status = startupTitle;
-                    }
+                if (startupStatus) {
                     const auto title = GetAppTitle_nid_postfix();
-                    if (!status.empty()) status = std::string(title.value) + " | " + status;
-                    SDL_SetWindowTitle(window.Handle(), status.empty() ? title.value : status.c_str());
+                    const auto caption = startupStatus->empty() ? title.value : std::string(title.value) + " | " + *startupStatus;
+                    SDL_SetWindowTitle(window.Handle(), caption.c_str());
                 }
 #endif
                 SDL_Event event;
@@ -943,6 +945,19 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
             ModalDialogSetPresenter_nid_postfix(window.Handle() != nullptr);
             pollHostHdr();
             OnMainThread([&] { mouseInput->UpdateCapture(!padInput->MouseModeEnabled()); });
+#if defined(ANYPS5_KYTY)
+            if (!current && startupStatus && !startupStatus->empty()) {
+                const ModalDialogView view{std::u16string(startupStatus->begin(), startupStatus->end()), {}};
+                const auto extensions = windowExtensions(window.Handle());
+                const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface,
+                    &windowDrawableSize, VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT, nullptr};
+                AgcDriverSetSystemDialog_nid_postfix(&view);
+                struct ClearStartupDialog {
+                    ~ClearStartupDialog() { AgcDriverSetSystemDialog_nid_postfix(nullptr); }
+                } clearStartupDialog;
+                AgcDriverPresentClear_nid_postfix(target, true, nullptr, [](void*) {}, this);
+            }
+#endif
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
