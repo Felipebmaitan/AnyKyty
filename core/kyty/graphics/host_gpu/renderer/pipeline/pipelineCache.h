@@ -701,9 +701,12 @@ private:
 	void CompileWorker();
 	void StopWorkers();
 #if defined(ANYPS5_KYTY)
-	uint32_t      ComputePipelineState(const ShaderModule& module);
-	ShaderModule* ServeComputeVariant(Program& program, uint32_t push_data_cursor, const ShaderModule* exact,
-	                                  uint32_t least_state);
+	bool ComputePipelineReady(const ShaderModule& module, bool ahead = false);
+	void NoteInstalledComputeReady(uint64_t module_id, const Pipeline& pipeline);
+	size_t FindReadyComputeVariant(const Program& program, const ShaderRecompiler::IR::ResourceSnapshot& resources,
+	                               const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+	                               uint32_t push_data_cursor, const ShaderModule* exact, bool ahead);
+	ShaderModule* ServeComputeVariant(Program& program, uint32_t push_data_cursor, const ShaderModule* exact);
 	void          SpecializeComputeVariant(const ProgramKey& key, Program& program, const ShaderParams& params,
 	                                       const ShaderComputeInputInfo&                       input_info,
 	                                       const ShaderRecompiler::IR::ResourceSpecialization& specialization,
@@ -750,6 +753,9 @@ private:
 	std::unordered_map<GraphicsPipelineKey, AsyncNativePipeline, GraphicsPipelineKeyHash> m_async_native;
 	std::shared_ptr<const std::atomic<bool>>                                   m_pipeline_waiting;
 	std::unordered_map<uint64_t, Pipeline>                                     m_async_ready_compute;
+#if defined(ANYPS5_KYTY)
+	std::unordered_set<uint64_t>                                               m_installed_compute_ready;
+#endif
 	std::unordered_set<uint64_t>                                               m_async_asked_compute;
 	std::mutex                                                       m_async_mutex;
 	std::condition_variable                                          m_async_available;
