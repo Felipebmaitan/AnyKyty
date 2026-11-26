@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 
 namespace {
 
@@ -14,6 +15,41 @@ void Check(bool condition, const char* message) {
 		std::fprintf(stderr, "%s\n", message);
 		std::exit(1);
 	}
+}
+
+void ManifestDiscovery() {
+	namespace fs = std::filesystem;
+	const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+	const auto root = fs::temp_directory_path() / ("kyty_manifest_startup_" + std::to_string(stamp));
+	Check(fs::create_directory(root), "new manifest fixture directory");
+	const std::array folders {root / "packaged", root / "local"};
+	for (const auto& folder: folders) Check(fs::create_directory(folder), "manifest fixture subdirectory");
+	const auto write = [](const fs::path& path) {
+		std::ofstream file(path);
+		file << "# kyty pipeline manifest v1\n";
+		file.close();
+		Check(static_cast<bool>(file), "manifest fixture file");
+	};
+
+	const auto local_compute = folders[1] / "fixture.compute.kpm";
+	Check(FindManifestFiles(folders, "fixture", "fixture").empty(), "no startup data with empty cache directories");
+	write(local_compute);
+	Check(FindManifestFiles(folders, "fixture", "fixture") == std::vector {local_compute},
+	      "an unversioned compute-only cache counts as startup data");
+	const auto packaged_compute = folders[0] / "fixture_1.compute.kpm";
+	write(packaged_compute);
+	Check(FindManifestFiles(folders, "fixture", "fixture_1") == std::vector {packaged_compute},
+	      "a packaged compute-only cache is discovered once");
+	const auto primary = folders[1] / "fixture_1.kpm";
+	const auto shared = folders[1] / "fixture_1.shared.kpm";
+	const auto versioned_compute = folders[1] / "fixture_1.compute.kpm";
+	write(primary);
+	write(shared);
+	write(versioned_compute);
+	Check(FindManifestFiles(folders, "fixture", "fixture_1") ==
+	          std::vector {primary, shared, packaged_compute, versioned_compute},
+	      "primary and shared manifests preserve priority and both compute manifests are loaded");
+	fs::remove_all(root);
 }
 
 void ModuleScheduling() {
@@ -75,6 +111,7 @@ void MemoryPause() {
 }
 
 int main() {
+	ManifestDiscovery();
 	ModuleScheduling();
 	VideoWait();
 	MemoryPause();

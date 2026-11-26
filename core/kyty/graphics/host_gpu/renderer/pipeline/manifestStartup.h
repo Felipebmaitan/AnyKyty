@@ -5,13 +5,49 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <iterator>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace Libs::Graphics {
+
+inline std::vector<std::filesystem::path> FindManifestFiles(std::span<const std::filesystem::path> folders,
+                                                            const std::string& title, const std::string& stem) {
+	std::vector<std::filesystem::path> files;
+	if (folders.empty()) return files;
+
+	const auto append = [&](const std::filesystem::path& path) {
+		std::error_code error;
+		if (std::filesystem::is_regular_file(path, error) && std::ranges::find(files, path) == files.end()) {
+			files.push_back(path);
+		}
+	};
+	for (const auto& folder: folders) {
+		append(folder / (stem + ".kpm"));
+	}
+	if (files.empty()) {
+		const auto prefix = std::filesystem::path(title + "_");
+		for (const auto& folder: folders) {
+			std::error_code error;
+			for (const auto& entry: std::filesystem::directory_iterator(folder, error)) {
+				const auto path = entry.path();
+				if (path.filename().native().starts_with(prefix.native()) && path.extension() == ".kpm") {
+					append(path);
+				}
+			}
+		}
+	}
+	append(folders.back() / (stem + ".shared.kpm"));
+	for (const auto& folder: folders) {
+		append(folder / (stem + ".compute.kpm"));
+	}
+	return files;
+}
 
 inline auto NextManifestModule(std::deque<uint32_t>& jobs, std::span<const uint32_t> ranks,
                                std::span<const std::size_t> guest_words, bool allow_large, bool prefer_large) {

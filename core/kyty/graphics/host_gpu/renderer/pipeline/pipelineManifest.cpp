@@ -565,35 +565,6 @@ PipelineCache::ProgramKey PipelineCache::ManifestProgramKey(const ManifestModule
 
 namespace {
 
-std::vector<std::filesystem::path> FindManifestFiles(const std::vector<std::filesystem::path>& folders,
-                                                     const std::string& title, const std::string& name,
-                                                     const std::filesystem::path& shared_path) {
-	std::vector<std::filesystem::path> files;
-	for (const auto& folder: folders) {
-		if (Common::File::IsFileExisting(folder / name)) {
-			files.push_back(folder / name);
-		}
-	}
-	if (files.empty()) {
-		for (const auto& folder: folders) {
-			std::error_code error;
-			for (const auto& entry: std::filesystem::directory_iterator(folder, error)) {
-				const auto file = Common::PathToString(entry.path().filename());
-				if (file.starts_with(title + "_") && file.ends_with(".kpm")) {
-					files.push_back(entry.path());
-				}
-			}
-		}
-	}
-
-	if (Common::File::IsFileExisting(shared_path) &&
-	    std::ranges::find(files, shared_path) == files.end()) {
-		files.push_back(shared_path);
-	}
-
-	return files;
-}
-
 std::string ManifestStem(const std::string& title) {
 	std::string version;
 	Loader::SystemContentParamSfoGetString("APP_VER", &version);
@@ -622,7 +593,7 @@ bool PipelineCache::HasStartupPipelineData() {
 	std::vector<std::filesystem::path> folders;
 	if (!assets.empty()) folders.push_back(assets);
 	folders.emplace_back("_PipelineCache");
-	return !FindManifestFiles(folders, title, stem + ".kpm", folders.back() / (stem + ".shared.kpm")).empty();
+	return !FindManifestFiles(folders, title, stem).empty();
 }
 
 void PipelineCache::OpenManifest() {
@@ -639,12 +610,8 @@ void PipelineCache::OpenManifest() {
 	if (!assets.empty()) folders.push_back(assets);
 	folders.emplace_back("_PipelineCache");
 	const auto shared_path = folders.back() / (stem + ".shared.kpm");
-	auto files = FindManifestFiles(folders, title, name, shared_path);
-	const auto compute_path = folders.back() / (stem + ".compute.kpm");
-	if (Common::File::IsFileExisting(compute_path) &&
-	    std::ranges::find(files, compute_path) == files.end()) {
-		files.push_back(compute_path);
-	}
+	const auto files = FindManifestFiles(folders, title, stem);
+	const auto compute_name = std::filesystem::path(stem + ".compute.kpm");
 
 	m_manifest.reset(new ManifestState());
 	auto& state = *m_manifest;
@@ -671,17 +638,16 @@ void PipelineCache::OpenManifest() {
 			const auto start = std::chrono::steady_clock::now();
 			file.read = LoadManifest(ReadFile(files[i]), file.manifest, &file.skipped, &file.unlinked);
 			file.time = std::chrono::steady_clock::now() - start;
-			if (file.read && files[i] != compute_path) {
+			if (!file.read) continue;
+			if (files[i].filename() != compute_name) {
 				manifests.push_back(&file.manifest);
+				continue;
 			}
-		}
-		DecideRuntimeStrides(manifests);
-		if (const auto found = std::ranges::find(files, compute_path); found != files.end()) {
-			const auto& generic = read_files[found - files.begin()];
-			for (const auto& module: generic.manifest.modules) {
+			for (const auto& module: file.manifest.modules) {
 				if (module.stage == ShaderType::Compute) m_baked_stride_programs.insert(module.ProgramHash());
 			}
 		}
+		DecideRuntimeStrides(manifests);
 	}
 	for (const auto& path: files) {
 		auto&      file     = read_files[static_cast<size_t>(&path - files.data())];
