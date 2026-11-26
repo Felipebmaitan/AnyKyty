@@ -5741,7 +5741,7 @@ NativeTraversals TraceNativeTraversals(Program& program, const NativeTraversalOp
 				if (InLoop(program, bvh->Parent(), walk.header, walk.latch)) served.push_back(bvh);
 			}
 			if (RewriteResultsWalk(program, options, walk.header, walk.latch, served, result, site)) { ++result.sites; hypotheses.clear(); improvements.clear(); continue; }
-			if (const auto flags = MarkOracleWalk(served); flags != 0) {
+			if (const auto flags = options.emulation ? MarkOracleWalk(served) : 0u; flags != 0) {
 				LOGF("%s universal ray tracing: hash=0x%016llx answers %zu intersections from the host query (%s mode, %s source)\n",
 				     compute ? "CS" : "PS", static_cast<unsigned long long>(program.shader_hash), served.size(),
 				     (flags & BvhIntersectOracleLane) != 0 ? "lane" : "wave", walk.kind == Kind::Universal ? "evaluated" : "form");

@@ -128,6 +128,91 @@ uint32_t MarkOracleWalk(std::span<Inst* const> walk) {
 	return walk.empty() ? 0u : flags;
 }
 
+namespace {
+
+size_t BlockAt(const Program& program, const Block* block) {
+	return static_cast<size_t>(std::ranges::find(program.blocks, block) - program.blocks.begin());
+}
+
+Block* InnermostLoop(const Program& program, const Block* block) {
+	const auto at = BlockAt(program, block);
+	for (auto header = at + 1; header-- > 0;) {
+		const auto& term = program.blocks[header]->terminator;
+		if (term.loop_header && term.continue_block != nullptr && term.merge_block != nullptr &&
+		    BlockAt(program, term.continue_block) >= at) {
+			return program.blocks[header];
+		}
+	}
+	return nullptr;
+}
+
+bool BoundLoop(Program& program, Block& header, uint32_t limit) {
+	const auto first = BlockAt(program, &header);
+	const auto last  = BlockAt(program, header.terminator.continue_block);
+	Block*     latch = nullptr;
+	for (auto* pred: header.ImmPredecessors()) {
+		const auto at = BlockAt(program, pred);
+		if (at < first || at > last) continue;
+		if (latch != nullptr) return false;
+		latch = pred;
+	}
+	if (latch == nullptr || latch->condition.IsEmpty() ||
+	    latch->terminator.kind != CFG::TerminatorKind::ConditionalBranch) {
+		return false;
+	}
+	const bool repeat_on_true = latch->terminator.true_block == &header;
+	if (!repeat_on_true && latch->terminator.false_block != &header) return false;
+	auto& count = *header.PrependNewInst(header.begin(), ValueOpcode::Phi);
+	count.SetFlags(Type::U32);
+	const auto body = std::ranges::find_if(header, [](const Inst& inst) { return inst.GetOpcode() != ValueOpcode::Phi; });
+	auto&      next = *header.PrependNewInst(body, ValueOpcode::IAdd32, {Value(&count), Value(1u)});
+	for (auto* pred: header.ImmPredecessors()) {
+		count.AddPhiOperand(pred, pred == latch ? Value(&next) : Value(0u));
+	}
+	auto& under = *latch->PrependNewInst(latch->end(), ValueOpcode::ULessThan32, {Value(&next), Value(limit)});
+	if (repeat_on_true) {
+		latch->condition = Value(&*latch->PrependNewInst(latch->end(), ValueOpcode::LogicalAnd, {latch->condition, Value(&under)}));
+	} else {
+		auto& over       = *latch->PrependNewInst(latch->end(), ValueOpcode::LogicalNot, {Value(&under)});
+		latch->condition = Value(&*latch->PrependNewInst(latch->end(), ValueOpcode::LogicalOr, {latch->condition, Value(&over)}));
+	}
+	return true;
+}
+
+}
+
+size_t MarkWalksEmpty(Program& program) {
+	size_t marked = 0;
+	for (auto* block: program.blocks) {
+		for (auto& inst: *block) {
+			if (inst.GetOpcode() != ValueOpcode::BvhIntersect) continue;
+			const auto flags = inst.Flags<uint32_t>();
+			if ((flags & BvhIntersectEmpty) != 0) continue;
+			inst.SetFlags((flags & ~BvhIntersectOracle & ~BvhIntersectOracleLane) | BvhIntersectEmpty);
+			marked += (flags & BvhIntersectNative) == 0 ? 1u : 0u;
+		}
+	}
+	return marked;
+}
+
+size_t BoundEmptyWalks(Program& program, uint32_t limit) {
+	std::vector<Block*> headers;
+	for (auto* block: program.blocks) {
+		for (const auto& inst: *block) {
+			if (inst.GetOpcode() != ValueOpcode::BvhIntersect) continue;
+			const auto flags = inst.Flags<uint32_t>();
+			if ((flags & BvhIntersectEmpty) == 0 || (flags & BvhIntersectNative) != 0) continue;
+			auto* header = InnermostLoop(program, block);
+			if (header != nullptr && std::ranges::find(headers, header) == headers.end()) headers.push_back(header);
+		}
+	}
+	size_t bounded = 0;
+	for (auto* header: headers) {
+		bounded += BoundLoop(program, *header, limit) ? 1u : 0u;
+	}
+	return bounded;
+}
+
 size_t MarkEmptyWalk(const Program& program, std::span<Inst* const> intersections, const NativeTraversalOptions& options) {
 	if (!options.rewrite) return 0;
 	size_t marked = 0;

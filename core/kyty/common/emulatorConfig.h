@@ -74,6 +74,7 @@ struct ConfigOptions {
 	bool                   async_pipelines_enabled     = true;
 	bool                   async_pipelines_skip_more   = false;
 	bool                   rt_stats_enabled            = false;
+	bool                   rt_emulation                = true;
 	uint32_t               rt_oracle                   = 0;
 	uint32_t               rt_check_period             = 0;
 	uint32_t               rt_check_ppm                = 1000;
@@ -129,6 +130,7 @@ bool NativeRtEnabled();
 bool AsyncPipelinesEnabled();
 bool AsyncPipelinesSkipMore();
 bool RayTracingStatsEnabled();
+bool RayTracingEmulation();
 uint32_t RayTracingOracle();
 uint32_t RayTracingCheckPeriod();
 uint32_t RayTracingCheckPpm();

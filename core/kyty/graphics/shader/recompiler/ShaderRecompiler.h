@@ -30,6 +30,7 @@ struct CompileOptions {
 	bool                        native_ray_tracing         = false;
 	bool                        ray_stats                  = false;
 	uint32_t                    rt_oracle                  = 0;
+	bool                        rt_emulation               = true;
 	bool                        table_mode                 = false;
 	std::span<const uint32_t>   user_data;
 	std::span<const uint32_t>   back_code;

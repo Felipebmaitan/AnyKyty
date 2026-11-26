@@ -17,5 +17,7 @@ constexpr uint32_t OraclePixel     = 8u;
 uint32_t           MarkOracleWalk(std::span<Inst* const> walk);
 size_t             MarkEmptyWalk(const Program& program, std::span<Inst* const> intersections,
                                  const NativeTraversalOptions& options);
+size_t             MarkWalksEmpty(Program& program);
+size_t             BoundEmptyWalks(Program& program, uint32_t limit);
 
 }

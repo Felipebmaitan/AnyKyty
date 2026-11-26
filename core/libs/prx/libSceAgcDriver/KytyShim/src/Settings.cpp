@@ -79,6 +79,7 @@ constexpr std::string_view Names[] = {
     "KYTY_RT_CHECK",
     "KYTY_RT_CHECK_PPM",
     "KYTY_RT_CHECK_STRIKES",
+    "KYTY_RT_EMULATION",
     "KYTY_RT_ORACLE",
     "KYTY_RT_RESULTS",
     "KYTY_RT_STATS",

@@ -16,6 +16,7 @@
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/RayQueryOracle.h"
+#include "graphics/shader/recompiler/ir/passes/RayQueryResults.h"
 #include "graphics/shader/recompiler/ir/passes/RayQueryTraversal.h"
 #include "graphics/shader/recompiler/ir/passes/ReadLaneElimination.h"
 #include "graphics/shader/recompiler/ir/passes/RelativeVgprLowering.h"
@@ -42,6 +43,8 @@
 namespace Libs::Graphics::ShaderRecompiler {
 
 namespace {
+
+constexpr uint32_t EmptyWalkIterations = 4096;
 
 std::string MakeIrDump(std::string_view cfg, const IR::Program& ir) {
 	std::string dump = "CFG:\n";
@@ -717,7 +720,11 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 		return inst.opcode == Decoder::Opcode::IMAGE_BVH_INTERSECT_RAY;
 	});
 	constexpr uint32_t pixel_oracle = IR::OracleRemaining | IR::OraclePixel;
-	if (options.stage == ShaderType::Pixel && options.native_ray_tracing && bvh &&
+	const uint32_t     rt_oracle    = !options.native_ray_tracing ? 0u
+	                                  : options.rt_emulation || (options.rt_oracle & IR::OracleRemaining) == 0
+	                                      ? options.rt_oracle
+	                                      : options.rt_oracle | IR::OracleResults;
+	if (options.stage == ShaderType::Pixel && options.native_ray_tracing && options.rt_emulation && bvh &&
 	    (options.rt_oracle & pixel_oracle) != pixel_oracle &&
 	    NoteRayTracingProgram(RayTracingProgramKind::PixelGuest, options.shader_hash)) {
 		::Log::WriteToConsoleAndLog(fmt::format("[RT] ps 0x{:016x}: pixel walk kept on the guest traversal: pixel oracle "
@@ -725,11 +732,12 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 		                                        options.shader_hash));
 	}
 	if (options.stage == ShaderType::Compute ||
-	    (options.stage == ShaderType::Pixel && options.native_ray_tracing && options.rt_oracle != 0)) {
+	    (options.stage == ShaderType::Pixel && options.native_ray_tracing && rt_oracle != 0)) {
 		const auto traced = IR::TraceNativeTraversals(
 		    ir, {.wave_size = options.wave_size,
 		         .rewrite   = options.native_ray_tracing,
-		         .oracle    = options.native_ray_tracing ? options.rt_oracle : 0u,
+		         .oracle    = rt_oracle,
+		         .emulation = options.rt_emulation,
 		         .decoded   = &decoded});
 		oracle_sources      = traced.oracle_sources;
 		oracle_improvements = traced.oracle_improvements;
@@ -765,19 +773,28 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			     options.shader_hash, traced.sites);
 			NoteRayTracingProgram(RayTracingProgramKind::Native, options.shader_hash);
 		}
+	}
+	if (bvh) {
+		if (!options.rt_emulation) IR::MarkWalksEmpty(ir);
 		size_t intersections = 0, empty = 0;
 		for (const auto* block: ir.blocks) {
 			for (const auto& inst: *block) {
 				if (inst.GetOpcode() != IR::ValueOpcode::BvhIntersect) continue;
 				++intersections;
-				empty += (inst.Flags<uint32_t>() & IR::BvhIntersectEmpty) != 0 ? 1u : 0u;
+				const auto flags = inst.Flags<uint32_t>();
+				empty += (flags & IR::BvhIntersectEmpty) != 0 && (flags & IR::BvhIntersectNative) == 0 ? 1u : 0u;
 			}
 		}
 		if (empty != 0 && NoteRayTracingProgram(RayTracingProgramKind::Empty, options.shader_hash)) {
-			::Log::WriteToConsoleAndLog(fmt::format("[RT] {} 0x{:016x}: {} of {} BVH intersections run empty: no form "
-			                                        "and no host query serves them, their rays miss\n",
-			                                        options.stage == ShaderType::Compute ? "cs" : "ps",
-			                                        options.shader_hash, empty, intersections));
+			::Log::WriteToConsoleAndLog(
+			    !options.rt_emulation ? fmt::format("[RT] {} 0x{:016x}: {} of {} BVH intersections run empty: no form serves them "
+			                              "and ray tracing emulation is off (KYTY_RT_EMULATION=0), their rays miss\n",
+			                              options.stage == ShaderType::Compute ? "cs" : "ps", options.shader_hash, empty,
+			                              intersections)
+			                : fmt::format("[RT] {} 0x{:016x}: {} of {} BVH intersections run empty: no form "
+			                              "and no host query serves them, their rays miss\n",
+			                              options.stage == ShaderType::Compute ? "cs" : "ps",
+			                              options.shader_hash, empty, intersections));
 		}
 	}
 	IR::TrackResources(ir, *tracked, native_cfg, options.input_info);
@@ -860,6 +877,12 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 		IR::EliminateDeadCode(ir.blocks);
 	}
 
+	if (!options.rt_emulation) {
+		if (const auto bounded = IR::BoundEmptyWalks(ir, EmptyWalkIterations); bounded != 0) {
+			LOGF("ShaderRecompiler %s empty BVH walks bounded: hash=0x%016" PRIx64 " loops=%zu iterations=%u\n", stage,
+			     ir.shader_hash, bounded, EmptyWalkIterations);
+		}
+	}
 	IR::CollectShaderInfo(ir, options.input_info);
 	std::string ir_dump;
 	if (options.dump_ir) {

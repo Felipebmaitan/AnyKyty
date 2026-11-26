@@ -181,12 +181,16 @@ bool RayTracingStatsEnabled() {
 	return g_config->native_rt && g_config->rt_stats_enabled;
 }
 
+bool RayTracingEmulation() {
+	return g_config->rt_emulation;
+}
+
 uint32_t RayTracingOracle() {
 	return g_config->native_rt ? g_config->rt_oracle : 0u;
 }
 
 uint32_t RayTracingCheckPeriod() {
-	return g_config->native_rt ? g_config->rt_check_period : 0u;
+	return g_config->native_rt && g_config->rt_emulation ? g_config->rt_check_period : 0u;
 }
 
 uint32_t RayTracingCheckPpm() {

@@ -42,6 +42,7 @@ struct NativeTraversalOptions {
 	uint32_t wave_size = 64;
 	bool rewrite = false;
 	uint32_t oracle = 0;
+	bool emulation = true;
 	const Decoder::Program* decoded = nullptr;
 };
 
