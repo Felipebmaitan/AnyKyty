@@ -185,6 +185,105 @@ bool SameTexture(const IR::DescriptorValue& value, const Texture& texture) {
 	return std::equal(texture.begin(), texture.end(), value.dwords.begin());
 }
 
+struct TestImageHeap final: IR::ImageHeapSource {
+	std::array<IR::DescriptorValue, 1> kinds;
+	std::vector<uint32_t> rebound_mapping;
+	bool allow_direct = false;
+	bool allow_rebind = true;
+
+	bool Acquire(const IR::ImageHeapRequest& request, IR::ImageHeapView& result) override {
+		if (!allow_direct || !request.table || request.count != 3u) return false;
+		result = {.slots = TableAddress, .slot_count = 17, .kinds = kinds};
+		return true;
+	}
+
+	bool AcquireList(const IR::ImageHeapList& request, IR::ImageHeapView& result) override {
+		if (!allow_rebind || request.table == nullptr) return false;
+		rebound_mapping = request.table->mapping;
+		result = {.slots = TableAddress, .slot_count = 17, .kinds = kinds};
+		return true;
+	}
+};
+
+void RebindTableAndHeap(bool on) {
+	auto fixture = Translate();
+	auto& plan = fixture.plan;
+	Check(plan.info.images.size() == 1 && !plan.info.buffers.empty(), "fixture has a source image and buffer");
+	if (plan.info.images.size() != 1 || plan.info.buffers.empty()) return;
+	auto& indirect = plan.descriptor_sources[plan.info.images.front().source].indirect_descriptor;
+	Check(indirect.has_value(), "fixture has an indirect image source");
+	if (!indirect) return;
+	indirect->table_source = plan.info.buffers.front().source;
+	indirect->table_array = true;
+	indirect->table_mask = 0x7fu;
+	indirect->table_offset = 0;
+
+	const auto a = MakeTexture(TextureA, Format8888);
+	const auto b = MakeTexture(TextureB, Format8888);
+	std::fill_n(g_guest, GuestBytes / 4u, 0u);
+	for (uint32_t i = 0; i < a.size(); ++i) {
+		Poke(TableAddress + i * 4u, a[i]);
+		Poke(TableAddress + 32u + i * 4u, b[i]);
+	}
+	std::array<uint32_t, 16> user {};
+	user[0] = user[4] = static_cast<uint32_t>(TableAddress);
+	user[1] = user[5] = static_cast<uint32_t>(TableAddress >> 32u);
+	user[2] = 3;
+	user[6] = 96;
+	user[7] = 0xfacu | (Format32UInt << 12u) | (1u << 24u) | (3u << 28u);
+	TestImageHeap heap;
+	heap.kinds[0].dword_count = 8;
+	std::copy(a.begin(), a.end(), heap.kinds[0].dwords.begin());
+	const IR::SrtRuntime runtime {.user_data = user, .read_specialization_memory = ReadMemory, .image_heap = &heap};
+	Materialized table;
+	Materialized native_heap;
+	table.ok = IR::MaterializeResources(plan, runtime, table.snapshot, table.specialization);
+	heap.allow_direct = true;
+	native_heap.ok = IR::MaterializeResources(plan, runtime, native_heap.snapshot, native_heap.specialization);
+	Check(table.ok && native_heap.ok, "the fixture materializes both table and heap addressing");
+	if (!table.ok || !native_heap.ok) return;
+	Check(table.snapshot.image_tables.size() == 1 && native_heap.snapshot.image_tables.empty(),
+	      "table and heap use distinct address representations");
+	if (table.snapshot.image_tables.size() != 1 || !native_heap.snapshot.image_tables.empty()) return;
+	Check(IR::CanRebindComputeImages(plan, table.specialization, native_heap.specialization) == on,
+	      "ready heap shape can represent the same typed table");
+	IR::ResourceSnapshot rebound;
+	const bool to_heap = IR::RebindComputeImages(plan, runtime, table.snapshot, table.specialization,
+	                                            native_heap.specialization, rebound);
+	Check(to_heap == on, "table dispatch can rematerialize compatible heap bindings");
+	if (to_heap) {
+		Check(heap.rebound_mapping == std::vector<uint32_t> {3, 1, 2, 0},
+		      "heap bridge preserves entry ordinals and the null slot");
+		Check(rebound.flattened_srt == native_heap.snapshot.flattened_srt && rebound.images == native_heap.snapshot.images,
+		      "heap bridge produces the same resource shape as normal heap materialization");
+	}
+	const bool to_table = IR::RebindComputeImages(plan, runtime, native_heap.snapshot, native_heap.specialization,
+	                                             table.specialization, rebound);
+	Check(to_table == on, "heap dispatch can rematerialize compatible table bindings");
+	if (to_table) {
+		Check(rebound.image_tables.size() == 1 && rebound.image_tables[0].mapping == table.snapshot.image_tables[0].mapping &&
+		          rebound.flattened_srt == table.snapshot.flattened_srt,
+		      "table bridge preserves original descriptor lookup");
+	}
+	auto invalid = native_heap.specialization;
+	invalid.images.back().numeric_class = Prospero::TextureNumericClass::Uint;
+	Check(!IR::CanRebindComputeImages(plan, table.specialization, invalid), "heap bridge rejects different child types");
+	invalid = table.specialization;
+	invalid.images[0].table_entry_mask ^= 1u;
+	Check(!IR::CanRebindComputeImages(plan, native_heap.specialization, invalid), "table bridge rejects different masks");
+	heap.allow_rebind = false;
+	Check(!IR::RebindComputeImages(plan, runtime, table.snapshot, table.specialization, native_heap.specialization, rebound),
+	      "heap allocation rejection never installs an incompatible snapshot");
+
+	auto widened = table.specialization;
+	widened.images[0].table_capacity *= 2;
+	Check(IR::AlignResources(plan, table.snapshot, table.specialization, widened, nullptr) == on,
+	      "an otherwise identical wider table accepts the existing slots");
+	widened.images[0].table_capacity = 1;
+	Check(!IR::AlignResources(plan, table.snapshot, table.specialization, widened, nullptr),
+	      "an undersized table rejects the existing slots");
+}
+
 void Generic(bool on) {
 	const auto program = Translate();
 	const auto& plan   = program.plan;
@@ -292,6 +391,7 @@ int main() {
 	}
 	CheckComputeQueueKeys();
 	Generic(on);
+	RebindTableAndHeap(on);
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d failure(s)\n", g_failures);
 		return 1;

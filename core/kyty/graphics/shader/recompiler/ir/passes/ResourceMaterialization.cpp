@@ -1421,7 +1421,8 @@ bool MaterializeImageTableHeap(const ResourcePlan& program,
                                const DescriptorSource::IndirectDescriptor& indirect,
                                const DescriptorValue& table_value, uint32_t image_index,
                                const SrtRuntime& runtime, ResourceSnapshot& snapshot,
-                               ResourceSpecialization& specialization) {
+                               ResourceSpecialization& specialization,
+                               const ImageTableSnapshot* captured = nullptr) {
 	const auto&          root = program.info.images[image_index];
 	ShaderBufferResource table;
 	if (root.resource_class != ImageResourceClass::Sampled ||
@@ -1441,7 +1442,19 @@ bool MaterializeImageTableHeap(const ResourcePlan& program,
 	const auto profile = ImageTableHeapProfile(root, SamplerSkipsDegamma(program, snapshot, image_index));
 	ImageHeapView   view;
 	DescriptorValue exemplar {.dword_count = 8u};
-	if (runtime.image_heap != nullptr) {
+	if (captured != nullptr) {
+		if (runtime.image_heap == nullptr || captured->base != base || captured->size != size ||
+		    captured->offset != indirect.table_offset || captured->entry_mask != (indirect.table_mask >> 5u))
+			return false;
+		const auto found = std::ranges::find_if(captured->slots, [&](const auto& value) {
+			return ImageTableSlotCompatible(profile, value) && ImageTableHeapExemplar(profile, value);
+		});
+		if (found == captured->slots.end() ||
+		    !runtime.image_heap->AcquireList({.owner = &program, .resource = image_index, .root = &profile,
+		                                      .values = {}, .table = captured}, view)) return false;
+		exemplar = *found;
+		snapshot.specialization_reads.emplace_back(base, size);
+	} else if (runtime.image_heap != nullptr) {
 		if (!runtime.image_heap->Acquire({.base  = base,
 		                                  .size  = size,
 		                                  .step  = 32u,
@@ -2536,8 +2549,11 @@ bool IndirectSamplerMaterializationFailed() {
 	return t_indirect_sampler_failure;
 }
 
-bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
-                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+static bool MaterializeResourcesForViews(const ResourcePlan& program, const SrtRuntime& runtime,
+                                         ResourceSnapshot& snapshot, ResourceSpecialization& specialization,
+                                         [[maybe_unused]] std::span<const ResourceSpecialization::Image> views,
+                                         [[maybe_unused]] const ResourceSnapshot* original = nullptr,
+                                         [[maybe_unused]] const ResourceSpecialization* natural = nullptr) {
 	t_indirect_buffer_failure = false;
 	t_indirect_sampler_failure = false;
 	t_record_blocks.clear();
@@ -2835,7 +2851,13 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		if (!WalkedDescriptor(program, indirect.table_source, table)) {
 			return false;
 		}
-		if (!MaterializeImageTableHeap(program, indirect, table, i, observed, snapshot, specialization) &&
+		const bool use_table = i < views.size() && views[i].table_capacity != 0;
+		const ImageTableSnapshot* captured = nullptr;
+		if (natural != nullptr && original != nullptr && i < views.size() && views[i].heap &&
+		    natural->images[i].table < original->image_tables.size()) {
+			captured = &original->image_tables[natural->images[i].table];
+		}
+		if ((use_table || !MaterializeImageTableHeap(program, indirect, table, i, observed, snapshot, specialization, captured)) &&
 		    !MaterializeImageTable(program, indirect, table, i, observed, snapshot, specialization,
 		                           previous_tables, table_mappings)) {
 			return false;
@@ -2845,6 +2867,11 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	FlushRecordBlocks(snapshot.flattened_srt);
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	return BuildResourceSpecialization(program, snapshot, specialization);
+}
+
+bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
+                          ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	return MaterializeResourcesForViews(program, runtime, snapshot, specialization, {});
 }
 
 bool SpecializeDirectResources(const ResourcePlan& program, ResourceSnapshot& snapshot,
@@ -3653,6 +3680,23 @@ bool AlignResources(const ResourcePlan& program, const ResourceSnapshot& snapsho
 		if (aligned != nullptr && aligned != &snapshot) *aligned = snapshot;
 		return true;
 	}
+	if (!snapshot.image_tables.empty() && specialization.images.size() == target.images.size() &&
+	    specialization.samplers == target.samplers) {
+		bool fits = true;
+		for (size_t index = 0; fits && index < specialization.images.size(); ++index) {
+			auto view = specialization.images[index];
+			const auto& served = target.images[index];
+			if (view.table_capacity != 0 && view.table < snapshot.image_tables.size() &&
+			    served.table_capacity >= snapshot.image_tables[view.table].slots.size()) {
+				view.table_capacity = served.table_capacity;
+			}
+			fits = view == served;
+		}
+		if (fits) {
+			if (aligned != nullptr && aligned != &snapshot) *aligned = snapshot;
+			return true;
+		}
+	}
 	if (!g_stable_indirect_layouts.load(std::memory_order_relaxed) || !snapshot.image_tables.empty()) return false;
 	std::vector<RootShape> images_from, images_to, samplers_from, samplers_to;
 	std::vector<uint8_t>   deferred_from, deferred_to;
@@ -3705,6 +3749,76 @@ bool AlignResources(const ResourcePlan& program, const ResourceSnapshot& snapsho
 		aligned->uniform_fill         = snapshot.uniform_fill;
 		aligned->gpu_flat_loads       = snapshot.gpu_flat_loads;
 	}
+	return true;
+}
+
+namespace {
+
+ResourceSpecialization::Image ImageViewForm(ResourceSpecialization::Image image) {
+	image = SlotForm(image);
+	image.heap = false;
+	image.table = ImageResource::NoImageTable;
+	image.table_capacity = 0;
+	image.table_mapping_offset = 0;
+	image.table_entry_mask = 0;
+	return image;
+}
+
+enum class ImageAddressing { Plain, Search, Heap, Table };
+
+ImageAddressing Addressing(const ResourceSpecialization::Image& image) {
+	if (image.table_capacity != 0) return ImageAddressing::Table;
+	if (image.heap) return ImageAddressing::Heap;
+	return image.indirect_root != ImageResource::NoIndirectImage ? ImageAddressing::Search : ImageAddressing::Plain;
+}
+
+}
+
+bool CanRebindComputeImages(const ResourcePlan& program, const ResourceSpecialization& specialization,
+                            const ResourceSpecialization& target) {
+	const auto roots = program.info.images.size();
+	if (!GenericComputeVariants() || program.stage != ShaderType::Compute ||
+	    specialization.images.size() < roots || target.images.size() < roots ||
+	    specialization.buffers != target.buffers || specialization.samplers != target.samplers) return false;
+	bool changes_addressing = false;
+	for (size_t index = 0; index < roots; ++index) {
+		const auto& live = specialization.images[index];
+		const auto& served = target.images[index];
+		if (ImageViewForm(live) != ImageViewForm(served)) return false;
+		const auto from = Addressing(live);
+		const auto to = Addressing(served);
+		if (from == to) continue;
+		const bool to_table = to == ImageAddressing::Table && from == ImageAddressing::Heap;
+		const bool to_heap = from == ImageAddressing::Table && to == ImageAddressing::Heap;
+		if (!to_table && !to_heap) return false;
+		const auto* source = Source(program, program.info.images[index].source);
+		if (source == nullptr || !source->indirect_descriptor || !source->indirect_descriptor->table_array ||
+		    program.info.images[index].resource_class != ImageResourceClass::Sampled ||
+		    program.info.images[index].mip_mode == ImageMipMode::Dynamic ||
+		    (to_table ? served : live).table_entry_mask != (source->indirect_descriptor->table_mask >> 5u)) return false;
+		const auto& heap = to_table ? specialization.images : target.images;
+		const auto children = std::span(heap).subspan(roots);
+		const auto child = std::ranges::find(children, index, &ResourceSpecialization::Image::indirect_root);
+		if (child == children.end() || ImageViewForm(*child) != ImageViewForm(to_table ? served : live) ||
+		    std::find_if(std::next(child), children.end(), [&](const auto& other) {
+			    return other.indirect_root == index;
+		    }) != children.end()) return false;
+		changes_addressing = true;
+	}
+	return changes_addressing;
+}
+
+bool RebindComputeImages(const ResourcePlan& program, const SrtRuntime& runtime, const ResourceSnapshot& snapshot,
+                         const ResourceSpecialization& specialization, const ResourceSpecialization& target,
+                         ResourceSnapshot& aligned) {
+	if (!CanRebindComputeImages(program, specialization, target)) return false;
+	ResourceSnapshot rebound;
+	ResourceSpecialization shape;
+	if (!MaterializeResourcesForViews(program, runtime, rebound, shape, target.images, &snapshot, &specialization) ||
+	    !AlignResources(program, rebound, shape, target, &rebound)) {
+		return false;
+	}
+	aligned = std::move(rebound);
 	return true;
 }
 

@@ -705,8 +705,10 @@ private:
 	void NoteInstalledComputeReady(uint64_t module_id, const Pipeline& pipeline);
 	size_t FindReadyComputeVariant(const Program& program, const ShaderRecompiler::IR::ResourceSnapshot& resources,
 	                               const ShaderRecompiler::IR::ResourceSpecialization& specialization,
-	                               uint32_t push_data_cursor, const ShaderModule* exact, bool ahead);
-	ShaderModule* ServeComputeVariant(Program& program, uint32_t push_data_cursor, const ShaderModule* exact);
+	                               uint32_t push_data_cursor, const ShaderModule* exact, bool ahead,
+	                               bool rematerialize = false);
+	ShaderModule* ServeComputeVariant(Program& program, const ShaderRecompiler::IR::SrtRuntime& runtime,
+	                                  uint32_t push_data_cursor, const ShaderModule* exact);
 	void          SpecializeComputeVariant(const ProgramKey& key, Program& program, const ShaderParams& params,
 	                                       const ShaderComputeInputInfo&                       input_info,
 	                                       const ShaderRecompiler::IR::ResourceSpecialization& specialization,

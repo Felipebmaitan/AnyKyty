@@ -103,6 +103,11 @@ bool GenericComputeVariants();
 bool AlignResources(const ResourcePlan& program, const ResourceSnapshot& snapshot,
                     const ResourceSpecialization& specialization, const ResourceSpecialization& target,
                     ResourceSnapshot* aligned);
+bool CanRebindComputeImages(const ResourcePlan& program, const ResourceSpecialization& specialization,
+                            const ResourceSpecialization& target);
+bool RebindComputeImages(const ResourcePlan& program, const SrtRuntime& runtime, const ResourceSnapshot& snapshot,
+                         const ResourceSpecialization& specialization, const ResourceSpecialization& target,
+                         ResourceSnapshot& aligned);
 bool WidenSpecialization(const ResourcePlan& program, const ResourceSnapshot& snapshot,
                          const ResourceSpecialization&                       specialization,
                          std::span<const ResourceSpecialization* const>      known,
