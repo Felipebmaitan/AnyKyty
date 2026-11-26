@@ -2,10 +2,13 @@ name: Brainrot
 
 on:
   push:
-    branches: [Brainrot, 'Brainrot/**']
+    branches: [Brainrot, 'Brainrot/**', test/brainrot-merge-ci]
     paths-ignore:
       - '**.md'
       - LICENSE
+  pull_request:
+    branches: [Brainrot]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       pr:
