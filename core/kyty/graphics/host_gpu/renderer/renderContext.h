@@ -49,6 +49,7 @@ public:
 	KYTY_CLASS_NO_COPY(RenderContext);
 
 	[[nodiscard]] GraphicContext&           GetGraphics() const noexcept { return m_graphics; }
+	void NoteFirstGuestCommand(bool compute);
 	void                                    InitializeGpu(VideoOut::VideoOutDriver* video_out);
 	void                                    ShutdownGpu();
 	[[nodiscard]] GuestGpu&                 GetGpu() const;
@@ -148,6 +149,7 @@ private:
 	TextureCache              m_texture_cache;
 	ImageHeap                 m_image_heap;
 	PipelineCache             m_pipeline_cache;
+	std::atomic<uint8_t>      m_first_guest_commands {0};
 	StrictWatch               m_strict_watch {m_page_manager};
 	IndirectWriteTables       m_indirect_write_tables {*this};
 	OcclusionQueries          m_occlusion_queries {*this};

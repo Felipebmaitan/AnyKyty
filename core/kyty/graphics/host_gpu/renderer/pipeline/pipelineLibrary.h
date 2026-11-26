@@ -31,6 +31,7 @@ enum class PipelineLibraryPart : uint32_t {
 
 [[nodiscard]] bool PipelineLibrariesWanted();
 
+std::string GraphicsLayoutKey(const std::array<const ShaderModule*, 4>& stages, bool native);
 void       CreateGraphicsPipelineLayout(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                                         const GraphicsPipelineKey&                 key,
                                         const std::array<const ShaderModule*, 4>& stages);

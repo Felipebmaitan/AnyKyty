@@ -422,13 +422,18 @@ private:
 	uint32_t                  m_samples  = 0;
 };
 
+class LinkedComputeStore;
+
 class PipelineCache {
 public:
 	PipelineCache(GraphicContext& graphics, ShaderRecompiler::IR::ImageHeapSource* image_heap,
-	              const std::filesystem::path& shader_store = {});
+	              const std::filesystem::path& shader_store = {}, bool compile_compute_pipelines = true);
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
 	void Save();
+	static bool HasStartupPipelineData();
+	bool WaitForStartupManifest(std::chrono::milliseconds timeout, uint32_t& done, uint32_t& total,
+	                            bool& memory_paused);
 
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
@@ -437,8 +442,10 @@ public:
 		vk::ShaderStageFlags    push_stages;
 		bool                    uses_push_descriptors = false;
 		bool                    uses_image_heap       = false;
+		bool                    stored                = false;
 		bool                    use_noted             = false;
 		bool                    native_bindings       = false;
+		bool                    linked_dispatch_noted = false;
 		ManifestFloatModes      float_modes {};
 		uint64_t                float_modes_generation = 0;
 	};
@@ -486,6 +493,8 @@ public:
 	                              const DrawRenderState& state);
 #endif
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
+	bool GetGenericCheckStage(const ShaderStageRuntime& exact, ShaderStageRuntime& generic,
+	                          ShaderRecompiler::IR::ResourceSnapshot& aligned);
 	Pipeline* TryGetComputePipeline(const ShaderComputeInputInfo& input_info);
 	[[nodiscard]] const std::shared_ptr<const std::atomic<bool>>& PipelineWaiting() const {
 		return m_pipeline_waiting;
@@ -580,8 +589,12 @@ private:
 
 	using ModuleMap = std::unordered_map<uint64_t, const ShaderModule*>;
 
+#if defined(ANYPS5_KYTY)
+	std::unique_ptr<LinkedComputeStore>    m_linked_store;
+#endif
 	GraphicContext&                        m_graphics;
 	ShaderRecompiler::IR::ImageHeapSource* m_image_heap;
+	const bool m_compile_compute_pipelines;
 	std::unordered_map<ProgramKey, Program, ProgramKeyHash> m_program_cache KYTY_GUARDED_BY(m_program_lock);
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
 	ProgramKey                             m_lookup_key KYTY_GUARDED_BY(m_program_lock);
@@ -643,6 +656,11 @@ private:
 	const ShaderModule* GetAhead(const ShaderParams& params, InputInfo& input_info,
 	                             uint32_t& push_data_cursor, ProgramResolution& ahead)
 	    KYTY_NO_THREAD_SAFETY_ANALYSIS;
+#if defined(ANYPS5_KYTY)
+	const ShaderModule* RestoreLinkedModule(const ProgramKey& key, Program& program,
+	                                        const ShaderRecompiler::CompileOptions& options,
+	                                        std::span<const uint32_t> code, uint32_t cursor);
+#endif
 	const ShaderModule* CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,
@@ -674,7 +692,8 @@ private:
 	                  const ShaderRecompiler::IR::ResourceSpecialization* specialization,
 	                  bool                                                guest_traversal = false,
 	                  bool                                                speculative     = false,
-	                  bool                                                lane_pairs      = false)
+	                  bool                                                lane_pairs      = false,
+	                  bool                                                own_source      = false)
 	    KYTY_REQUIRES(m_program_lock);
 	bool WaitForCompile(const ProgramKey& key) KYTY_REQUIRES(m_program_lock);
 	template <typename InputInfo>
@@ -719,6 +738,7 @@ private:
 		std::array<const ShaderModule*, 4> stages {};
 		const ShaderModule*                module = nullptr;
 	};
+	std::deque<AsyncPipelineJob> m_restore_jobs;
 	std::unordered_set<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_async_pending_graphics;
 	std::unordered_set<uint64_t>                                     m_async_pending_compute;
 	std::unordered_set<GraphicsPipelineKey, GraphicsPipelineKeyHash> m_async_failed_graphics;
@@ -819,7 +839,7 @@ private:
 	[[nodiscard]] bool LiveTargets(const DrawTargets& targets) const;
 	RenderContext* m_render = nullptr;
 	bool CreateGraphicsPipelineNow(Pipeline& pipeline, const GraphicsPipelineKey& key,
-	                               const std::array<const ShaderModule*, 4>& stages);
+	                               const std::array<const ShaderModule*, 4>& stages, bool allow_link = true);
 	bool CreateGraphicsPipelineFast(Pipeline& pipeline, const GraphicsPipelineKey& key,
 	                                const std::array<const ShaderModule*, 4>& stages);
 	void ApplyOptimizedPipelines();
@@ -859,7 +879,7 @@ private:
 	bool InitializeDriverCache();
 	void CheckpointDriverCache(bool slow_creation = false);
 	void NoteCreatedPipeline(std::chrono::steady_clock::time_point started);
-	void PostDueDriverCache();
+	void PostDueDriverCache(bool force = false);
 	void WriteDriverCache();
 
 	void WarmUp(const std::filesystem::path& path, bool driver_cache_restored);
@@ -897,6 +917,7 @@ private:
 	                  std::span<const uint32_t> code, uint32_t push_data_cursor,
 	                  const ShaderModule& module);
 	bool RecordPipeline(const GraphicsPipelineKey& key, const ManifestFloatModes& float_modes);
+	void CaptureQueuedPipeline(const GraphicsPipelineKey& key, const HW::Shader& shaders);
 	void NoteFloatModes(Pipeline& pipeline, const GraphicsPipelineKey& key, const HW::Shader& shaders);
 	void RecordLayout(uint64_t key, const ShaderTessellationInputInfo& layout);
 	static void OnShaderMapped(void* userdata, uint64_t hash, std::span<const uint32_t> code);
@@ -904,13 +925,18 @@ private:
 	void CodeStoreThread(const std::stop_token& stop);
 	bool ScanGameFiles(const std::stop_token&                                          stop,
 	                   const std::function<void(uint64_t, std::span<const uint32_t>)>& append);
-	void ManifestWorker(const std::stop_token& stop);
+	void ManifestWorker(const std::stop_token& stop, bool allow_large);
 	std::pair<uint32_t, uint32_t> AddManifestRecords(PipelineManifest& loaded);
 	void ReloadSharedManifest();
 	void BuildManifestModule(uint32_t index, std::span<const uint32_t> code,
-	                         std::span<const uint32_t> back_code, bool guest_traversal = false);
-	void CreateManifestPipeline(uint32_t index);
-	void CreateManifestComputePipeline(const ShaderModule& module, bool from_assets);
+	                         std::span<const uint32_t> back_code, const std::stop_token& stop, bool guest_traversal = false);
+	void FinishStartupIfIdle();
+	void CreateManifestPipeline(uint32_t index, const std::stop_token& stop);
+	void CreateManifestGraphicsPipeline(const GraphicsPipelineKey& key, const std::array<const ShaderModule*, 4>& stages,
+	                                    bool from_assets, bool stored, const std::stop_token& stop);
+	void CreateManifestComputePipeline(const ShaderModule& module, bool from_assets, const std::stop_token& stop);
+	static ProgramKey ManifestProgramKey(const ManifestModule& record, bool guest_traversal,
+	                                    const ShaderComputeInputInfo* compute_input = nullptr);
 	void SetComputeLdsStorage(ShaderComputeInputInfo& input) const;
 	void SetHostInput(ManifestModule& module) const;
 	const ShaderModule* FindCompiledModule(
@@ -924,7 +950,12 @@ private:
 		uint32_t pipelines       = 0;
 		uint32_t running         = 0;
 		bool     scanning        = false;
+		uint32_t startup_total   = 0;
+		uint32_t startup_done    = 0;
+		bool     memory_paused   = false;
 		uint64_t modules_done    = 0;
+		uint64_t modules_total   = 0;
+		uint64_t failures        = 0;
 		uint64_t pipelines_done  = 0;
 		uint32_t threads         = 0;
 		double   module_seconds   = 0.0;

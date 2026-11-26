@@ -141,6 +141,8 @@ struct GraphicContext {
 	};
 	[[nodiscard]] uint32_t GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> heaps) const;
 	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image);
+	[[nodiscard]] bool     CreateImage(const vk::ImageCreateInfo& info, VulkanImage& image,
+	                                   bool bindless);
 	void                   DeleteImage(VulkanImage& image);
 
 	uint32_t screen_width  = 0;

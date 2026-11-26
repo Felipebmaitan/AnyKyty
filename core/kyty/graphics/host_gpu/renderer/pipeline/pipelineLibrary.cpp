@@ -42,15 +42,8 @@ void Append(std::string& key, const T& value) {
 	key.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-std::string LayoutKey(const GraphicsPipelineKey& key, bool native) {
-	std::string result;
-	Append(result, key.stage_ids);
-	Append(result, native);
-	return result;
-}
-
 std::string PartKey(PipelineLibraryPart part, const GraphicsPipelineKey& key,
-                    const PipelineLibraries::Stages& stages, bool native) {
+                    const PipelineLibraries::Stages& stages, vk::PipelineLayout layout) {
 	const auto& params = key.static_params;
 	std::string result;
 	switch (part) {
@@ -63,7 +56,15 @@ std::string PartKey(PipelineLibraryPart part, const GraphicsPipelineKey& key,
 			}
 			break;
 		case PipelineLibraryPart::PreRasterization:
-			result = LayoutKey(key, native);
+			Append(result, static_cast<VkPipelineLayout>(layout));
+			for (size_t i = 0; i < 3; ++i) Append(result, key.stage_ids[i]);
+			if (params.patch_control_points != 0 && stages[1] == nullptr) {
+				for (const auto& parameter: stages[3]->rect_parameters) {
+					Append(result, parameter.input_location);
+					Append(result, parameter.output_location);
+					Append(result, parameter.flat);
+				}
+			}
 			Append(result, params.negative_one_to_one);
 			Append(result, params.depth_clip_enable);
 			Append(result, params.patch_control_points);
@@ -72,7 +73,8 @@ std::string PartKey(PipelineLibraryPart part, const GraphicsPipelineKey& key,
 			Append(result, params.polygon_mode);
 			break;
 		case PipelineLibraryPart::FragmentShader:
-			result = LayoutKey(key, native);
+			Append(result, static_cast<VkPipelineLayout>(layout));
+			Append(result, key.stage_ids[3]);
 			Append(result, params.samples);
 			Append(result, params.sample_shading_enable);
 			Append(result, params.alpha_to_coverage_enable);
@@ -307,14 +309,14 @@ bool PipelineLibraries::Link(PipelineCache::Pipeline& pipeline, const GraphicsPi
 		return false;
 	}
 	const bool native = pipeline.native_bindings;
-	const auto layout = LibraryLayout(LayoutKey(key, native), key, stages, native);
+	const auto layout = LibraryLayout(GraphicsLayoutKey(stages, native), key, stages, native);
 	if (layout == nullptr) {
 		return false;
 	}
 	m_last_link.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
 	m_active.store(true, std::memory_order_relaxed);
 	const auto request = [&](PipelineLibraryPart part, vk::PipelineLayout part_layout) {
-		return Request(part, PartKey(part, key, stages, native), key, stages, native, part_layout, true, false);
+		return Request(part, PartKey(part, key, stages, layout), key, stages, native, part_layout, true, false);
 	};
 	const bool mesh              = stages[0]->info.stage == ShaderType::Mesh;
 	const auto pre_rasterization = request(PipelineLibraryPart::PreRasterization, layout);
@@ -375,12 +377,12 @@ void PipelineLibraries::Prepare(const GraphicsPipelineKey& key, const Stages& st
 	if (!Eligible(stages)) {
 		return;
 	}
-	const auto layout = LibraryLayout(LayoutKey(key, native), key, stages, native);
+	const auto layout = LibraryLayout(GraphicsLayoutKey(stages, native), key, stages, native);
 	if (layout == nullptr) {
 		return;
 	}
 	for (const auto part: {PipelineLibraryPart::FragmentShader, PipelineLibraryPart::PreRasterization}) {
-		(void)Request(part, PartKey(part, key, stages, native), key, stages, native, layout, false, true);
+		(void)Request(part, PartKey(part, key, stages, layout), key, stages, native, layout, false, true);
 	}
 }
 
@@ -400,15 +402,15 @@ void PipelineLibraries::PrepareNow(const GraphicsPipelineKey& key, const Stages&
 	if (!Eligible(stages)) {
 		return;
 	}
-	const auto layout = LibraryLayout(LayoutKey(key, native), key, stages, native);
+	const auto layout = LibraryLayout(GraphicsLayoutKey(stages, native), key, stages, native);
 	if (layout == nullptr) {
 		return;
 	}
 	const auto fragment_shader = Request(PipelineLibraryPart::FragmentShader,
-	                                     PartKey(PipelineLibraryPart::FragmentShader, key, stages, native), key,
+	                                     PartKey(PipelineLibraryPart::FragmentShader, key, stages, layout), key,
 	                                     stages, native, layout, false, true);
 	const auto pre_rasterization = Request(PipelineLibraryPart::PreRasterization,
-	                                       PartKey(PipelineLibraryPart::PreRasterization, key, stages, native), key,
+	                                       PartKey(PipelineLibraryPart::PreRasterization, key, stages, layout), key,
 	                                       stages, native, layout, false, true);
 	BuildIfQueued(fragment_shader);
 	BuildIfQueued(pre_rasterization);

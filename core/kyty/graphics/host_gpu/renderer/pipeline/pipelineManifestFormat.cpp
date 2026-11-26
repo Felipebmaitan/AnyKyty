@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineManifest.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/shaderCompiler.h"
 
@@ -11,6 +12,7 @@
 #include <ranges>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <xxhash.h>
 
@@ -726,13 +728,18 @@ template <class Element>
 void ReadElements(TextReader& r, std::string_view key, std::vector<Element>& elements) {
 	const auto text = r.Find(key);
 	if (!text) return;
-	const auto parts = Split(*text, ',');
 #if defined(ANYPS5_KYTY)
-	r.ok             = r.ok && parts.size() <= 16384;
+	constexpr size_t limit = std::is_same_v<Element, ResourceSpecialization::Image>
+	                             ? DescriptorHeap::MaxSampledImages : 16384;
 #else
-	r.ok             = r.ok && parts.size() <= 4096;
+	constexpr size_t limit = 4096;
 #endif
-	elements.assign(r.ok ? parts.size() : 0, Element {});
+	if (!r.ok || std::ranges::count(*text, ',') >= static_cast<ptrdiff_t>(limit)) {
+		r.ok = false;
+		return;
+	}
+	const auto parts = Split(*text, ',');
+	elements.assign(parts.size(), Element {});
 	for (size_t i = 0; r.ok && i < parts.size(); i++) {
 		ElementReader reader(parts[i]);
 		VisitElement(reader, elements[i]);
@@ -791,7 +798,9 @@ bool ReadModule(std::span<const std::string_view> tokens, ManifestModule& module
 	r.ok            = code && ParseNumber(*code, module.code_hash, 16) && module.code_hash != 0;
 	if (const auto back = r.Find("back")) r.ok = r.ok && ParseNumber(*back, module.back_hash, 16);
 	r.Dec("ud", module.user_data_count, 0u);
-	r.Dec("cur", module.push_data_cursor, 0u);
+	uint32_t cursor = 0;
+	r.Dec("cur", cursor, 0u);
+	if (stage == ShaderType::Compute) module.push_data_cursor = cursor;
 	r.Flag("rb", module.runtime_buffers);
 	r.Flag("rs", module.runtime_samplers);
 	if (auto* vertex = std::get_if<ShaderVertexInputInfo>(&module.input)) {
@@ -1164,6 +1173,9 @@ bool ReadLayout(std::span<const std::string_view>                 tokens,
 }
 
 void NormalizeManifestInput(ManifestModule& module) {
+	if (module.stage != ShaderType::Compute) {
+		module.push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsStageCursor(module.stage);
+	}
 	if (auto* vertex = std::get_if<ShaderVertexInputInfo>(&module.input)) {
 		for (int i = 0; i < vertex->resources_num; i++) {
 			vertex->resources[i].UpdateAddress48(0);

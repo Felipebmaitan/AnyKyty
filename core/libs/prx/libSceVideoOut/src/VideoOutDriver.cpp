@@ -25,6 +25,7 @@
 #include "prx/libSceIme/include/ImeInput.hpp"
 #include "prx/libSceVideoOut/include/DialogInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
+#include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/include/Api.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
@@ -444,6 +445,36 @@ void VideoOutDriver::Shutdown() {
     std::lock_guard lock(flipQueue->mutex);
     if (flipQueue->failure) std::rethrow_exception(flipQueue->failure);
 }
+
+#if defined(ANYPS5_KYTY)
+void VideoOutDriver::WarmStartupPipelines() {
+    std::uint32_t done = 0;
+    std::uint32_t total = 0;
+    bool memoryPaused = false;
+    while (!AgcDriverWaitForStartupManifest_nid_postfix(&done, &total, &memoryPaused)) {
+        char status[112];
+        std::snprintf(status, sizeof(status), "Preparing pipelines %u / %u%s", done, total,
+                      memoryPaused ? " (waiting for memory)" : "");
+        std::lock_guard lock(mutex);
+        startupTitle = status;
+        startupTitleChanged.store(true, std::memory_order_release);
+    }
+    std::lock_guard lock(mutex);
+    if (!startupTitle.empty()) {
+        startupTitle.clear();
+        startupTitleChanged.store(true, std::memory_order_release);
+    }
+}
+
+extern "C" void VideoOutWarmPipelinesBeforeGuest_nid_no_patch() {
+    if (!AgcDriverHasStartupPipelineData_nid_postfix()) return;
+    std::fprintf(stderr, "[kyty-startup] preparing pipelines before guest entry\n");
+    VideoOutDriver::Get().WarmStartupPipelines();
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    std::fprintf(stderr, "[kyty-startup] preparation_released monotonic_ns=%lld\n",
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()));
+}
+#endif
 
 int VideoOutDriver::Open(int busType) {
     std::unique_lock lock(mutex);
@@ -871,7 +902,21 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 if (token.stop_requested()) break;
             }
 
+#if defined(ANYPS5_KYTY)
+            std::optional<std::string> startupStatus;
+            if (startupTitleChanged.exchange(false, std::memory_order_acq_rel)) {
+                std::lock_guard lock(mutex);
+                startupStatus = startupTitle;
+            }
+#endif
             const bool quit = OnMainThread([&] {
+#if defined(ANYPS5_KYTY)
+                if (startupStatus) {
+                    const auto title = GetAppTitle_nid_postfix();
+                    const auto caption = startupStatus->empty() ? title.value : std::string(title.value) + " | " + *startupStatus;
+                    SDL_SetWindowTitle(window.Handle(), caption.c_str());
+                }
+#endif
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) {
                     const std::unique_ptr<char, decltype(&SDL_free)> extendedText(event.type == SDL_TEXTEDITING_EXT ? event.editExt.text : nullptr, SDL_free);
@@ -907,6 +952,19 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                     flipQueue->requests.pop_front();
                 }
             }
+#if defined(ANYPS5_KYTY)
+            if (!current && startupStatus && !startupStatus->empty() && !AgcDriver::CurrentHostHdr().available) {
+                const ModalDialogView view{std::u16string(startupStatus->begin(), startupStatus->end()), {}};
+                const auto extensions = windowExtensions(window.Handle());
+                const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface,
+                    &windowDrawableSize, VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT, nullptr};
+                AgcDriverSetSystemDialog_nid_postfix(&view);
+                struct ClearStartupDialog {
+                    ~ClearStartupDialog() { AgcDriverSetSystemDialog_nid_postfix(nullptr); }
+                } clearStartupDialog;
+                AgcDriverPresentClear_nid_postfix(target, true, nullptr, [](void*) {}, this);
+            }
+#endif
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();

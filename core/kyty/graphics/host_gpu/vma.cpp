@@ -343,6 +343,42 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 }
 
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
+	return CreateImage(image_info, image, false);
+}
+
+static uint32_t BindlessImageSpillTypes(const GraphicContext& graphics) {
+	if (graphics.spill_allocator == nullptr) {
+		return 0;
+	}
+	const VkPhysicalDeviceMemoryProperties* limited = nullptr;
+	vmaGetMemoryProperties(graphics.allocator, &limited);
+	VmaBudget budgets[VK_MAX_MEMORY_HEAPS] {};
+	vmaGetHeapBudgets(graphics.allocator, budgets);
+	const auto& physical = graphics.physical_device_memory_properties;
+	bool pressure = false;
+	for (uint32_t heap = 0; heap < limited->memoryHeapCount; ++heap) {
+		const auto limit = limited->memoryHeaps[heap].size;
+		if (limit < physical.memoryHeaps[heap].size &&
+		    budgets[heap].statistics.blockBytes >= limit - limit / 4) {
+			pressure = true;
+			break;
+		}
+	}
+	if (!pressure) {
+		return 0;
+	}
+	uint32_t types = 0;
+	for (uint32_t type = 0; type < limited->memoryTypeCount; ++type) {
+		const auto heap = limited->memoryTypes[type].heapIndex;
+		if (!(limited->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) {
+			types |= uint32_t {1} << type;
+		}
+	}
+	return types;
+}
+
+bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image,
+                                 bool bindless) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
 
@@ -365,14 +401,39 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 		}
 	}
 	if (native_image == VK_NULL_HANDLE) {
-		auto result = static_cast<vk::Result>(vmaCreateImage(
-		    allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
-		    &native_image, &image.allocation, nullptr));
+		const auto* create = static_cast<const vk::ImageCreateInfo::NativeType*>(image_info);
+		auto result = vk::Result::eErrorOutOfDeviceMemory;
+		if (const uint32_t types = bindless ? BindlessImageSpillTypes(*this) : 0; types != 0) {
+			VmaAllocationCreateInfo spill_info {};
+			spill_info.flags          = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+			spill_info.usage          = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+			spill_info.memoryTypeBits = types;
+			result = static_cast<vk::Result>(vmaCreateImage(
+			    spill_allocator, create, &spill_info, &native_image, &image.allocation, nullptr));
+			image.spilled = result == vk::Result::eSuccess;
+		}
+		if (result != vk::Result::eSuccess) {
+			result = static_cast<vk::Result>(vmaCreateImage(
+			    allocator, create, &alloc_info, &native_image, &image.allocation, nullptr));
+		}
 		if (result != vk::Result::eSuccess) {
 			DestroyRecycledImages(allocator);
 			result = static_cast<vk::Result>(vmaCreateImage(
-			    allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
-			    &alloc_info, &native_image, &image.allocation, nullptr));
+			    allocator, create, &alloc_info, &native_image, &image.allocation, nullptr));
+		}
+		if (result != vk::Result::eSuccess && spill_allocator != nullptr) {
+			VmaAllocationCreateInfo spill_info {};
+			spill_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+			result           = static_cast<vk::Result>(vmaCreateImage(
+			    spill_allocator, create, &spill_info, &native_image, &image.allocation, nullptr));
+			if (result == vk::Result::eSuccess) {
+				image.spilled = true;
+				static std::atomic<uint32_t> reported {0};
+				if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+					LOGF("Vulkan memory: an image of %ux%u past the heap limit is placed by the spill allocator\n",
+					     image_info.extent.width, image_info.extent.height);
+				}
+			}
 		}
 		if (result != vk::Result::eSuccess && spill_allocator != nullptr) {
 			VmaAllocationCreateInfo spill_info {};

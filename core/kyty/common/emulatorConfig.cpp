@@ -97,6 +97,10 @@ bool PipelineManifestEnabled() {
 	return g_config->pipeline_manifest_enabled;
 }
 
+uint32_t StartupWaitSeconds() {
+	return g_config->startup_wait_seconds;
+}
+
 bool PipelineManifestRecord() {
 	return g_config->pipeline_manifest_record;
 }

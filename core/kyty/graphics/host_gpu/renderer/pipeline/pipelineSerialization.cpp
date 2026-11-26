@@ -13,6 +13,8 @@
 #include <cstring>
 #include <xxhash.h>
 #if defined(ANYPS5_KYTY)
+#include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
+#include <fstream>
 #include "kytyShaderStoreStamp.h"
 
 #include <cstdlib>
@@ -151,7 +153,8 @@ size_t PipelineCache::RestoreStoreRecords(std::span<const uint8_t> bytes, std::s
 		}
 		std::vector<StoreRecord> loaded(frames.size());
 		std::vector<uint8_t>     read(frames.size());
-		Common::ParallelFor(frames.size(), [&](size_t i) { read[i] = ReadRecord(frames[i], loaded[i]) ? 1 : 0; });
+		Common::ParallelFor(frames.size(), [&](size_t i) { read[i] = ReadRecord(frames[i], loaded[i]) ? 1 : 0; },
+		                    Common::ParallelThreads());
 		size_t kept = 0;
 		while (kept < frames.size() && read[kept] != 0 && AddRecord(loaded[kept])) {
 			records = records.subspan(frames[kept].size());

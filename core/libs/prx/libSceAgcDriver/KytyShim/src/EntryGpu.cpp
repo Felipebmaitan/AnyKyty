@@ -600,6 +600,21 @@ extern "C" void AgcDriverSuspendPoint_nid_postfix() try {
     LibcAwaitExit_nid_postfix();
 }
 
+extern "C" bool AgcDriverHasStartupPipelineData_nid_postfix() {
+    KytyShim::StartRuntime();
+    return Libs::Graphics::PipelineCache::HasStartupPipelineData();
+}
+
+extern "C" bool AgcDriverWaitForStartupManifest_nid_postfix(std::uint32_t* done, std::uint32_t* total, bool* memoryPaused) try {
+    auto& s = KytyShim::Entry::state();
+    std::shared_lock gate(s.gate);
+    KytyShim::Entry::CheckStopping();
+    auto& cache = KytyShim::Entry::Renderer().GetPipelineCache();
+    return cache.WaitForStartupManifest(std::chrono::milliseconds(250), *done, *total, *memoryPaused);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
+}
+
 extern "C" void AgcDriverWaitIdle_nid_postfix() try {
     KytyShim::Replay::RequireNotHeld("AgcDriverWaitIdle");
     auto& s = KytyShim::Entry::state();

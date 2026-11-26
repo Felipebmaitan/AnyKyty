@@ -2214,6 +2214,13 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		} else {
 			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
 		}
+		const auto& layout = state.vertex_info[i].stage.module->info.bindings;
+		if (layout.clip_plane_dwords != 0) {
+			const auto& planes = buffer.GetRegisters().GetUserClipPlanes();
+			EXIT_IF(layout.clip_plane_dwords > planes.size());
+			std::copy_n(planes.begin(), layout.clip_plane_dwords,
+			            bindings.vertex[i].shader_data.begin() + layout.ClipPlaneDword());
+		}
 		descriptor_stages[stage_count++] = &bindings.vertex[i];
 	}
 	if (state.ps_active) {
@@ -2357,12 +2364,6 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		vk_buffer.pushConstants(pipeline.pipeline_layout, pipeline.push_stages, 0,
 		                        draw_dwords * sizeof(uint32_t), draw_data.data());
 	}
-	if (const auto planes = vertex_stages.back().user_clip_planes; planes != 0) {
-		vk_buffer.pushConstants(pipeline.pipeline_layout, pipeline.push_stages,
-		                        PushData::UserClipPlaneDword * sizeof(uint32_t),
-		                        std::bit_width(planes) * 4u * sizeof(uint32_t),
-		                        buffer.GetRegisters().GetUserClipPlanes().data());
-	}
 
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), m_draw_targets->depth,
@@ -2389,6 +2390,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	m_context.NoteFirstGuestCommand(false);
 	if (mesh_task) {
 		vk_buffer.drawMeshTasksEXT(emit.indirect.count, 1, 1);
 	} else if (mesh_active) {

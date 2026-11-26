@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineLinkedStore.h"
 
 #include "common/logging/log.h"
 #include "common/parallelFor.h"
@@ -9,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fmt/format.h>
+#include <fstream>
 #include <ranges>
 #include <string_view>
 
@@ -64,6 +66,14 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 	if (header.empty()) {
 		return;
 	}
+#if defined(ANYPS5_KYTY)
+	auto linked_path = path;
+	std::ifstream linked(linked_path.replace_extension(".linked"), std::ios::binary);
+	if (linked) {
+		auto store = std::make_unique<LinkedComputeStore>();
+		if (store->Read(linked, header)) m_linked_store = std::move(store);
+	}
+#endif
 	const auto           start = std::chrono::steady_clock::now();
 	std::vector<uint8_t> bytes;
 	bool read_store = false;
@@ -88,6 +98,33 @@ void PipelineCache::WarmUp(const std::filesystem::path& path,
 	m_store.Open(path, header, kept);
 	const auto modules = MapModules();
 #if defined(ANYPS5_KYTY)
+	if (Config::PipelineManifestEnabled() && !PipelineCacheTitleId().empty()) {
+		for (const auto& key: m_graphics_pipelines | std::views::keys) {
+			AsyncPipelineJob job {.key = key};
+			bool found = true;
+			for (size_t i = 0; i < job.stages.size(); i++) {
+				const auto stage = modules.find(key.stage_ids[i]);
+				if (stage == modules.end()) {
+					found = false;
+					break;
+				}
+				job.stages[i] = stage->second;
+			}
+			if (found && SampledDescriptorBudgetFits(job.stages)) m_restore_jobs.push_back(job);
+		}
+		m_graphics_pipelines.clear();
+		if (m_compile_compute_pipelines) {
+			for (const auto* module: modules | std::views::values) {
+				if (module != nullptr && module->info.stage == ShaderType::Compute &&
+				    SampledDescriptorBudgetFits(std::span(&module, 1))) {
+					m_restore_jobs.push_back({.compute = true, .module = module});
+				}
+			}
+		}
+		Log::WriteToConsoleAndLog(fmt::format("Shader cache: restored {} modules, {} pipeline handles to resolve\n",
+		                                     modules.size() - 1, m_restore_jobs.size()));
+		return;
+	}
 	const bool shared = WarmUpSharedCache(m_graphics);
 	const bool lookup = driver_cache_restored && !shared && m_graphics.pipeline_cache_lookup_enabled;
 	std::vector<std::function<void(vk::PipelineCache)>> jobs;

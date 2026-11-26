@@ -53,6 +53,7 @@ struct ConfigOptions {
 	bool                   shader_validation_enabled   = false;
 	bool                   shader_cache_enabled        = false;
 	bool                   pipeline_manifest_enabled   = true;
+	uint32_t               startup_wait_seconds        = 900;
 	bool                   pipeline_manifest_record    = false;
 	bool                   pipeline_manifest_strict    = KYTY_STRICT_PIPELINE_MANIFEST_DEFAULT != 0;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
@@ -102,6 +103,7 @@ bool     VulkanValidationEnabled();
 bool                   ShaderValidationEnabled();
 bool                   ShaderCacheEnabled();
 bool                   PipelineManifestEnabled();
+uint32_t               StartupWaitSeconds();
 bool                   PipelineManifestRecord();
 bool                   PipelineManifestStrict();
 LogDirection           GetShaderLogDirection();

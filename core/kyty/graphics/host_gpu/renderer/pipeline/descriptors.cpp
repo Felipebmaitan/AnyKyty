@@ -1498,6 +1498,19 @@ static void CopyGpuFlatLoads(RenderContext& context, const vk::DescriptorBufferI
 	                       nullptr);
 }
 
+static bool TableTextureStale(const TextureBinding& texture, const Image* image) {
+	if (!texture.image_id) {
+		return false;
+	}
+	if (image == nullptr || (!image->registered && !image->info.data.Empty()) ||
+	    image->binding.needs_rebind) {
+		return true;
+	}
+	return !image->info.IsDepth() && !image->is_stencil_copy &&
+	       !image->info.data.Empty() &&
+	       !ImageViewOps::FormatsCompatible(image->backing.format, texture.desc.view_info.format);
+}
+
 static bool TableViewKeepable(const ImageLookupState& state, const Image& image) {
 	return !state.cpu_dirty && !state.buffer_modified &&
 	       (!image.info.data.Empty() || image.is_depth_copy);
@@ -1977,13 +1990,8 @@ void RenderExecutor::RebindReusedTables(PreparedBindings& prepared) {
 	const auto& program       = prepared.runtime->module->info;
 	auto&       texture_cache = m_context.GetTextureCache();
 	const auto  tick          = texture_cache.m_gc_tick;
-	const auto  stale         = [&](const TextureBinding& binding) {
-        if (!binding.image_id) {
-            return false;
-        }
-        const auto* image = texture_cache.m_slot_images.try_get(binding.image_id);
-        return image == nullptr || (!image->registered && !image->info.data.Empty()) ||
-               image->binding.needs_rebind;
+	const auto stale = [&](const TextureBinding& binding) {
+		return TableTextureStale(binding, texture_cache.m_slot_images.try_get(binding.image_id));
 	};
 	const auto unchanged = [&](uint32_t index) {
 		const auto& element = state.elements[index];
@@ -2823,7 +2831,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared, uint64_t invocati
 	prepared.uniform_buffers.resize(
 	    layout.descriptor_counts[static_cast<size_t>(BindingKind::UniformBuffers)]);
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
-	          prepared.shader_data.end(), 0);
+	          prepared.shader_data.begin() + layout.ClipPlaneDword(), 0);
 	auto pack_memory_offset = [&](uint32_t index, uint32_t offset) {
 		const auto dword = layout.memory_offset_dword + index / 4u;
 		const auto shift = (index % 4u) * 8u;
@@ -2936,12 +2944,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	auto&       images        = prepared.images;
 	auto&       texture_cache = m_context.GetTextureCache();
 	const auto stale = [&](const TextureBinding& binding) {
-		if (!binding.image_id) {
-			return false;
-		}
-		const auto* image = texture_cache.m_slot_images.try_get(binding.image_id);
-		return image == nullptr || (!image->registered && !image->info.data.Empty()) ||
-		       image->binding.needs_rebind;
+		return TableTextureStale(binding, texture_cache.m_slot_images.try_get(binding.image_id));
 	};
 	std::vector<bool> stale_tables(prepared.table_images.size());
 	for (size_t k = 0; k < prepared.table_images.size(); k++) {

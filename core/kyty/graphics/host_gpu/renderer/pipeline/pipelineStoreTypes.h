@@ -37,6 +37,7 @@ struct ShaderModule {
 #if defined(ANYPS5_KYTY)
 	mutable bool                                 pipeline_requested = false;
 	bool                                         shared_variant     = false;
+	bool                                         linked_prepared    = false;
 #endif
 };
 
