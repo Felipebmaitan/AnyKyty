@@ -64,14 +64,22 @@ def zstd_decoder():
 
 
 def inventory(args, binary):
-    images = [*args.image, *(image for image, _ in args.bindings)]
+    images = dict.fromkeys([*args.image, *args.auto_bindings, *(image for image, _ in args.bindings)])
     scan = subprocess.run([binary, '--inventory', args.assets, args.output, *images])
     if scan.returncode != 0:
         return scan.returncode
-    tool = Path(__file__).resolve().parents[1] / 'compute_recipes.py'
-    command = [sys.executable, tool, args.output / 'shaders.code', args.output / 'creation-records.bin',
+    tools = Path(__file__).resolve().parents[1]
+    store = args.output / 'shaders.code'
+    bindings = list(args.bindings)
+    for number, image in enumerate(args.auto_bindings):
+        mapping = args.output / f'elf-bindings-{number}.map'
+        extract = subprocess.run([sys.executable, tools / 'kyty_elf_shader_bindings.py', image, store, '--output', mapping])
+        if extract.returncode != 0:
+            return extract.returncode
+        bindings.append((image, mapping))
+    command = [sys.executable, tools / 'compute_recipes.py', store, args.output / 'creation-records.bin',
                '--output', args.output / 'compute-recipes.txt']
-    for image, mapping in args.bindings:
+    for image, mapping in bindings:
         command.extend(('--bindings', image, mapping))
     return subprocess.run(command).returncode
 
@@ -214,6 +222,8 @@ def main():
     scan.add_argument('assets', type=Path)
     scan.add_argument('output', type=Path)
     scan.add_argument('--image', type=Path, action='append', default=[], help='scan an executable outside the assets directory')
+    scan.add_argument('--auto-bindings', type=Path, action='append', default=[], metavar='RELINKED_ELF',
+                      help='scan a locally relinked ELF and recover validated detached shader bindings')
     scan.add_argument('--bindings', type=Path, nargs=2, action='append', default=[], metavar=('IMAGE', 'MAP'),
                       help='resolve detached shader headers with verified creation argument file offsets')
     prep = commands.add_parser('prepare')

@@ -302,6 +302,14 @@ This build does not read KytyPS5's `KYTY_PIPELINE_PRECOMPILE`: stopping the game
 | `KYTY_AB_SETTLE` | seconds, shorter than the phase, else stops | `2` | Seconds into a phase after which `KYTY_AB` counts it: its settled line, then its presents and img/s until the next phase | debug | all | AnyKyty |
 | `KYTY_AB_START` | flip count from 1, or `<n>s`, else stops | `0` | Flip at which `KYTY_AB` starts, or `<n>s` for `<n>` seconds after the first flip | debug | all | AnyKyty |
 
+Build the standalone precooker with `tools/precache/build-precache <build directory>`. The inventory command scans local assets and optionally recovers detached creation records from an already relinked executable.
+
+```sh
+tools/precache/precache --binary "$build/precache-tool/kyty_precache" inventory "$assets" "$inventory" --auto-bindings "$executable"
+```
+
+The output directory contains the local shader store, creation records, compute recipes, packaged Kyty manifests and a report of unsupported input formats. For a manually verified binding map, pass `--bindings IMAGE MAP`.
+
 With `KYTY_CAPTURE_QUEUED_PIPELINES` enabled, collect the complete graphics recipes from one or more logs for the same title and version. Pass `--manifest` once per existing manifest to merge its recorded recipes with the captures.
 
 ```sh
