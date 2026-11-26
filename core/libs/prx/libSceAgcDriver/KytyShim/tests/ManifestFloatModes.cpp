@@ -107,7 +107,7 @@ void LargeImageSpecialization() {
 	PipelineManifest manifest;
 	ManifestModule module {.stage = ShaderType::Compute, .code_hash = 0x1212121212121212ull};
 	module.input.emplace<ShaderComputeInputInfo>();
-	module.specialization.images.resize(32770);
+	module.specialization.images.resize(65537);
 	module.specialization.images.back().heap = true;
 	module.specialization.images.back().indirect_mapping_offset = 262238;
 	manifest.modules.push_back(std::move(module));

@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineManifest.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/shaderCompiler.h"
 
@@ -11,6 +12,7 @@
 #include <ranges>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <xxhash.h>
 
@@ -727,7 +729,8 @@ void ReadElements(TextReader& r, std::string_view key, std::vector<Element>& ele
 	const auto text = r.Find(key);
 	if (!text) return;
 #if defined(ANYPS5_KYTY)
-	const size_t limit = key == "si" ? 65536 : 16384;
+	constexpr size_t limit = std::is_same_v<Element, ResourceSpecialization::Image>
+	                             ? DescriptorHeap::MaxSampledImages : 16384;
 #else
 	constexpr size_t limit = 4096;
 #endif

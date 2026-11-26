@@ -1,3 +1,4 @@
+#include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -48,6 +49,30 @@ void Check(bool condition, const std::string& what) {
 	if (condition) return;
 	std::fprintf(stderr, "FAILED: %s\n", what.c_str());
 	g_failures++;
+}
+
+void CheckComputeQueueKeys() {
+	ShaderInit();
+	std::array<uint32_t, 2> code {0u, 0xbf810000u};
+	HW::ComputeShaderInfo regs {};
+	regs.cs_regs.data_addr = reinterpret_cast<uintptr_t>(code.data());
+	const auto key = [&](bool async, bool indirect) {
+		ShaderComputeInputInfo input {};
+		input.async_compute = async;
+		input.dispatch_indirect_threads = indirect;
+		PrepareProgram(regs, input);
+		std::vector<uint32_t> words;
+		BuildStageStaticKey(input, words);
+		return words;
+	};
+	for (const auto instruction: {0xbf800000u, 0xb9031818u, 0xb9070a18u, 0xbe802102u}) {
+		code[0] = instruction;
+		ShaderMapUserData(regs.cs_regs.data_addr, {.type = Prospero::ShaderBinaryType::kCs,
+		                                          .code_size_bytes = sizeof(code)});
+		const bool shared = instruction == 0xbf800000u;
+		Check((key(false, false) == key(true, false)) == shared, "compute queue dependence of the program key");
+		Check(key(false, false) != key(false, true), "indirect dispatch keeps its own program key");
+	}
 }
 
 using Texture = std::array<uint32_t, 8>;
@@ -265,6 +290,7 @@ int main() {
 		std::fprintf(stderr, "FAILED: the guest region could not be mapped\n");
 		return 1;
 	}
+	CheckComputeQueueKeys();
 	Generic(on);
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d failure(s)\n", g_failures);

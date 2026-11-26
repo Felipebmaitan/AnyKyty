@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/rayTracing.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/frontend/decode/ShaderFunctions.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/fileSystem.h"
 #include "loader/guestOodle.h"
@@ -2828,6 +2829,7 @@ void PipelineCache::BuildManifestModule(uint32_t index, std::span<const uint32_t
 			    options.stage            = ShaderType::Pixel;
 			    options.input_info.pixel = &info;
 		    } else {
+			    info.async_compute = info.async_compute && ShaderRecompiler::Decoder::ComputeShaderDependsOnQueue(code);
 			    options.stage              = ShaderType::Compute;
 			    options.input_info.compute = &info;
 		    }
