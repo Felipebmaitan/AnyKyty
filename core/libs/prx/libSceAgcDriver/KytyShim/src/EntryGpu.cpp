@@ -19,6 +19,7 @@
 
 #include "common/emulatorConfig.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/command_processor/computeDispatchOrigin.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -751,6 +752,11 @@ extern "C" void* AgcDriverStaticTable_nid_postfix() {
 extern "C" void AgcDriverPrepareCommandWrite_nid_no_patch(std::uint64_t address, std::size_t bytes) {
     static_cast<void>(address);
     static_cast<void>(bytes);
+}
+
+extern "C" void AgcDriverRecordComputePacketOrigin_nid_no_patch(const std::uint32_t* packet, std::uint32_t count,
+                                                                std::uint64_t callerReturn) {
+    Libs::Graphics::ComputeDispatchTrace::Record(packet, count, callerReturn);
 }
 
 extern "C" void AgcDriverNoteCommandSegment_nid_no_patch(std::uint64_t address, std::size_t bytes) {

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/guest_gpu/command_processor/computeDispatchOrigin.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineShaderDiagnostics.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineShaderOptions.h"
@@ -1319,6 +1320,14 @@ void LogRuntimePipelineMiss(const char* kind, const char* route, uint64_t varian
 	                 std::chrono::duration_cast<std::chrono::nanoseconds>(
 	                     std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+
+void LogComputeDispatchOrigin(const ShaderModule& module, const char* route) {
+	if (!ComputeDispatchTrace::FirstVariant(module.id)) return;
+	const auto origin = ComputeDispatchTrace::current;
+	PipelineCacheLog("[kyty-compute-origin] route={} variant={:016x} shader={:016x} submit={} packet={:016x} caller_return={:016x}",
+	                 route, module.id, module.info.shader_hash, origin.submit, origin.packet, origin.caller_return);
+}
+
 
 uint64_t ResourceShapeFingerprint(const ShaderRecompiler::IR::ResourceSpecialization& specialization) {
 	ShaderRecompiler::IR::Writer writer;
@@ -3403,6 +3412,9 @@ void PipelineCache::CreateComputePipelineAhead(const ShaderModule& module) {
 		}
 		ClaimComputePipeline(module.id);
 	}
+#if defined(ANYPS5_KYTY)
+	LogComputeDispatchOrigin(module, "ahead");
+#endif
 	QueueAsyncPipeline({.compute = true, .module = &module});
 }
 
@@ -4490,6 +4502,7 @@ PipelineCache::Pipeline* PipelineCache::TryGetComputePipeline(const ShaderComput
 				lock.unlock();
 #if defined(ANYPS5_KYTY)
 				LogRuntimePipelineMiss("compute", "queued", module.id, module.info.shader_hash);
+				LogComputeDispatchOrigin(module, "queued");
 #endif
 				QueueAsyncPipeline({.compute = true, .module = &module});
 				return nullptr;
@@ -4577,6 +4590,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 		}
 #if defined(ANYPS5_KYTY)
 		LogRuntimePipelineMiss("compute", "sync", module.id, module.info.shader_hash);
+		LogComputeDispatchOrigin(module, "sync");
 #endif
 		CreatePipelineInternal(m_graphics, pipeline, module, m_driver_cache);
 	}
