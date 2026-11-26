@@ -243,7 +243,7 @@ namespace {
 constexpr uint32_t ServedFlags    = IR::BvhIntersectNative | IR::BvhIntersectOracle | IR::BvhIntersectEmpty;
 constexpr uint32_t IntersectFlags = ServedFlags | IR::BvhIntersectOracleLane | IR::BvhIntersectStrict;
 
-bool KeepsGuestLanes(const IR::Inst& init, const std::array<bool, 4>* alpha_sites) {
+bool KeepsGuestLanes(const IR::Inst& init, const std::array<bool, IR::MaxRayQuerySites>* alpha_sites) {
 	const auto& allow = init.Arg(14);
 	if (!allow.IsImmediate() || !allow.U1()) return true;
 	const auto variant = IR::RayQueryVariant(init.Flags<uint32_t>());
@@ -252,7 +252,7 @@ bool KeepsGuestLanes(const IR::Inst& init, const std::array<bool, 4>* alpha_site
 	       (variant & IR::RayQueryInitOpaqueOnly) == 0 && (alpha_sites == nullptr || !(*alpha_sites)[site]);
 }
 
-bool GuestLanes(const IR::Program& program, const std::array<bool, 4>* alpha_sites) {
+bool GuestLanes(const IR::Program& program, const std::array<bool, IR::MaxRayQuerySites>* alpha_sites) {
 	return std::ranges::any_of(program.blocks, [&](const IR::Block* block) {
 		return std::ranges::any_of(*block, [&](const IR::Inst& inst) {
 			return inst.GetOpcode() == IR::ValueOpcode::RayQueryInit && KeepsGuestLanes(inst, alpha_sites);

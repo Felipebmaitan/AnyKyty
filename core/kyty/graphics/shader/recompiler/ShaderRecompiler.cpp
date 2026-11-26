@@ -753,6 +753,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			ir.info.ray_query_header_vsharp  = traced.header_vsharp;
 			ir.info.ray_query_root           = traced.root;
 			ir.info.ray_query_layout         = traced.layout;
+			ir.info.ray_query_extra_sources  = traced.extra_sources;
 			traced_source                    = decoded;
 			traced_source.ray_tracing_source = {.user_sgpr     = traced.user_sgpr,
 			                                    .header_offset = traced.header_offset,
