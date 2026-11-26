@@ -772,6 +772,11 @@ private:
 		uint32_t                              threads = 0;
 		std::chrono::steady_clock::time_point since;
 		std::chrono::steady_clock::time_point ended;
+#if defined(ANYPS5_KYTY)
+		uint64_t                              hash = 0;
+		const char*                           what = nullptr;
+		std::chrono::steady_clock::time_point hash_since;
+#endif
 	};
 	class StallScope {
 	public:
@@ -925,6 +930,9 @@ private:
 		uint32_t threads         = 0;
 		double   module_seconds   = 0.0;
 		double   pipeline_seconds = 0.0;
+		uint64_t modules_found     = 0;
+		uint64_t modules_built     = 0;
+		uint64_t pipelines_created = 0;
 	};
 	[[nodiscard]] ManifestBacklog GetManifestBacklog() const;
 

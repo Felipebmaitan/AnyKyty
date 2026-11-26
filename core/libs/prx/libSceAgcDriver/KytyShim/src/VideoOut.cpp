@@ -21,6 +21,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
+#include "prx/libSceAgcDriver/KytyShim/src/CompileNotice.hpp"
 #include "prx/libSceAgcDriver/KytyShim/src/Replay.hpp"
 #include "prx/libc/include/RunReport.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -67,6 +68,10 @@ std::shared_ptr<AgcDriver::IVideoOutput> VideoOutput(std::uint32_t handle);
 namespace KytyShim::Present {
 
 void WaitRendering(std::uint32_t handle, std::uint32_t index);
+void StartRepeats();
+void NoteGamePresent();
+void NoteGameImage();
+bool GameImageShown();
 
 namespace {
 
@@ -99,6 +104,7 @@ struct PresentationState {
     std::uint64_t nextFlip = 1;
     void* windowHandle = nullptr;
     bool attaching = false;
+    std::mutex repeat;
     VkSurfaceKHR (*createSurface)(void* context, VkInstance instance) = nullptr;
 };
 
@@ -415,6 +421,76 @@ Libs::Graphics::ImageInfo DisplayBufferImage(const AgcDriver::DisplayBuffer& buf
     return DisplayImageInfo(buffer);
 }
 
+namespace {
+
+constexpr auto RepeatPeriod = std::chrono::milliseconds(100);
+constexpr auto RepeatAfter = std::chrono::milliseconds(300);
+
+std::atomic<std::int64_t> lastGamePresent{0};
+std::atomic<bool> gameImageShown{false};
+
+std::int64_t SteadyNow() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void RepeatOnce() {
+    auto& state = State();
+    std::lock_guard repeat(state.repeat);
+    Libs::Graphics::WindowContext* host = nullptr;
+    {
+        std::lock_guard lock(state.mutex);
+        if (state.window == nullptr || state.windowHandle == nullptr || state.attaching) return;
+        host = state.window.get();
+    }
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    {
+        Common::LockGuard lock(host->mutex);
+        width = host->graphic_ctx.screen_width;
+        height = host->graphic_ctx.screen_height;
+    }
+    if (host->presenter->PresentRepeat(width, height)) {
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+            std::fprintf(stderr, "[kyty-videoout] the game presents no frame while shaders compile: the presenter repeats its last frame with the compile notice\n");
+            std::fflush(stderr);
+        }
+    }
+}
+
+void RepeatLoop() {
+    try {
+        for (;;) {
+            std::this_thread::sleep_for(RepeatPeriod);
+            if (!CompileNotice::Active()) continue;
+            if (SteadyNow() - lastGamePresent.load(std::memory_order_relaxed) < std::chrono::duration_cast<std::chrono::nanoseconds>(RepeatAfter).count()) continue;
+            RepeatOnce();
+        }
+    } catch (const ProcessShutdown&) {
+    } catch (...) {
+        Stop("compile notice presentation", std::current_exception());
+    }
+}
+
+}
+
+void NoteGamePresent() {
+    lastGamePresent.store(SteadyNow(), std::memory_order_relaxed);
+}
+
+void NoteGameImage() {
+    gameImageShown.store(true, std::memory_order_relaxed);
+}
+
+bool GameImageShown() {
+    return gameImageShown.load(std::memory_order_relaxed);
+}
+
+void StartRepeats() {
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(RepeatLoop).detach(); });
+}
+
 }
 
 namespace Libs::VideoOut {
@@ -563,6 +639,7 @@ void WindowShutdown() {
     std::unique_ptr<WindowContext> window;
     {
         auto& state = KytyShim::Present::State();
+        std::lock_guard repeat(state.repeat);
         std::lock_guard lock(state.mutex);
         window = std::move(state.window);
         state.windowHandle = nullptr;
@@ -580,9 +657,14 @@ SystemOverlay::~SystemOverlay() = default;
 
 bool SystemOverlay::PrepareFrame(vk::Extent2D extent, vk::Format format, uint32_t) {
     try {
+        const bool sdr = format == vk::Format::eB8G8R8A8Unorm || format == vk::Format::eR8G8B8A8Unorm;
         auto layout = AgcDriver::SystemOverlayLayout(VkExtent2D{extent.width, extent.height});
-        if (!layout.has_value()) return false;
-        if (format != vk::Format::eB8G8R8A8Unorm && format != vk::Format::eR8G8B8A8Unorm) throw std::runtime_error("kyty presentation: system dialogs and the system keyboard are drawn only into an 8-bit SDR swapchain");
+        if (layout.has_value() && !sdr) throw std::runtime_error("kyty presentation: system dialogs and the system keyboard are drawn only into an 8-bit SDR swapchain");
+        if (sdr && KytyShim::CompileNotice::Active()) {
+            if (!layout.has_value()) layout.emplace();
+            KytyShim::CompileNotice::LayOut(*layout, VkExtent2D{extent.width, extent.height}, !KytyShim::Present::GameImageShown());
+        }
+        if (!layout.has_value() || layout->rects.empty()) return false;
         m_impl->extent = extent;
         m_impl->layout = std::move(*layout);
         return true;
@@ -641,7 +723,7 @@ void SystemOverlay::Record(vk::CommandBuffer command, vk::ImageView target) {
 void SystemOverlay::ReleaseVulkan() {}
 
 SystemOverlayVisualState GetSystemOverlayVisualState() noexcept {
-    return {AgcDriver::SystemOverlayShown(), 0};
+    return {AgcDriver::SystemOverlayShown() || KytyShim::CompileNotice::Active(), 0};
 }
 
 void ShutdownSystemOverlayInput() {}
@@ -649,24 +731,6 @@ void ShutdownSystemOverlayInput() {}
 bool PerformanceOverlayEnabled() noexcept {
     return false;
 }
-
-bool ManifestProgressVisible() noexcept {
-    return false;
-}
-
-void ShowManifestProgress(const ManifestProgress&) {}
-
-void HideManifestProgress() {}
-
-void ShowPrecompileNotice(const PrecompileNotice& notice) {
-    static std::atomic<bool> told{false};
-    if (notice.visible && !told.exchange(true)) {
-        std::fprintf(stderr, "[kyty-videoout] the pipeline precompile notice is not drawn by the Kyty GPU driver: the game waits for its pipelines without it\n");
-        std::fflush(stderr);
-    }
-}
-
-void HidePrecompileNotice() {}
 
 }
 
@@ -718,9 +782,12 @@ extern "C" void AgcDriverAttachWindow_nid_postfix(const AgcDriver::PresentationW
     if (!(host->surface_capabilities.capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eTransferDst)) throw std::runtime_error("kyty presentation: the window surface cannot be a blit destination");
     KytyShim::Present::UpdateDrawableSize(*host, window);
     host->presenter->AttachSurface();
-    std::lock_guard lock(state.mutex);
-    state.windowHandle = window.context;
-    state.attaching = false;
+    {
+        std::lock_guard lock(state.mutex);
+        state.windowHandle = window.context;
+        state.attaching = false;
+    }
+    KytyShim::Present::StartRepeats();
 }
 
 namespace KytyShim::Present {
@@ -761,6 +828,7 @@ std::shared_ptr<PreparedFrames> PrepareGuestFrames(Libs::Graphics::RenderContext
 }
 
 void PresentLayers(Libs::Graphics::Presenter& presenter, Libs::Graphics::Presenter::Frame& main, Libs::Graphics::Presenter::Frame* overlay) {
+    NoteGamePresent();
     if (overlay == nullptr) {
         presenter.ClearLayer(OverlayBus);
         presenter.Present(main);
@@ -772,6 +840,7 @@ void PresentLayers(Libs::Graphics::Presenter& presenter, Libs::Graphics::Present
 
 void PresentGuestLayers(Libs::Graphics::WindowContext& host, Libs::Graphics::Presenter& presenter, Libs::Graphics::Presenter::Frame& main, Libs::Graphics::Presenter::Frame* overlay) {
     const auto before = host.loop.presented_frames.load(std::memory_order_relaxed);
+    NoteGameImage();
     PresentLayers(presenter, main, overlay);
     if (host.loop.presented_frames.load(std::memory_order_relaxed) != before) LibcRunReportFramePresented_nid_no_patch();
 }
@@ -815,6 +884,7 @@ extern "C" void AgcDriverPresentClear_nid_postfix(const AgcDriver::PresentationW
 
 extern "C" void AgcDriverReleaseWindow_nid_postfix(void* window) {
     auto& state = KytyShim::Present::State();
+    std::lock_guard repeat(state.repeat);
     std::lock_guard lock(state.mutex);
     if (window != nullptr && state.windowHandle == window) state.windowHandle = nullptr;
 }

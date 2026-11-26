@@ -248,7 +248,7 @@ public:
 	void     RecordPresentCommands(CommandBuffer& command, Presenter::Frame* source,
 	                               const Presenter::Layer& overlay, bool draw_system_overlay);
 	uint64_t Submit(CommandScheduler& scheduler);
-	[[nodiscard]] Status Present();
+	[[nodiscard]] Status Present(bool repeat = false);
 
 	[[nodiscard]] uint32_t ImageCount() const noexcept {
 		return static_cast<uint32_t>(m_images.size());
@@ -352,7 +352,7 @@ struct Presenter::Impl {
 		cache.UpdateImage(image_id);
 		return image;
 	}
-	void Present();
+	void Present(bool repeat = false);
 
 	RenderContext&        renderer;
 	WindowContext&        window;
@@ -1518,7 +1518,7 @@ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
 	}
 }
 
-Swapchain::Status Swapchain::Present() {
+Swapchain::Status Swapchain::Present(bool repeat) {
 	const auto         ready = m_render_complete[m_image_index];
 	vk::PresentInfoKHR present {};
 	present.sType              = vk::StructureType::ePresentInfoKHR;
@@ -1546,7 +1546,9 @@ Swapchain::Status Swapchain::Present() {
 			return Status::SurfaceLost;
 		default: EXIT("vkQueuePresentKHR failed: %s\n", vk::to_string(result).c_str());
 	}
-	NotePresentGap();
+	if (!repeat) {
+		NotePresentGap();
+	}
 	m_frame_index = (m_frame_index + 1u) % static_cast<uint32_t>(m_images.size());
 	return Status::Success;
 }
@@ -1624,6 +1626,31 @@ bool Presenter::PresentLastFrame() {
 	return true;
 }
 
+bool Presenter::PresentRepeat(uint32_t width, uint32_t height) {
+	Common::LockGuard lock(m_impl->present_mutex);
+	if (m_impl->swapchain.ImageCount() == 0) {
+		return false;
+	}
+	if (m_impl->layers[0].frame == nullptr && m_impl->layers[1].frame == nullptr) {
+		if (width == 0 || height == 0) {
+			return false;
+		}
+		const auto format = m_impl->frames.GetFormat();
+		auto*      frame  = m_impl->frames.Acquire({width, height}, format);
+		frame->source_flags = 0;
+		frame->blank        = true;
+		frame->Configure(m_impl->window.graphic_ctx, {width, height}, format);
+		vk::ClearColorValue clear {};
+		clear.float32[3] = 1.0f;
+		auto& command    = m_impl->present_scheduler.BeginCommand();
+		frame->Clear(command, clear);
+		frame->present_tick = m_impl->present_scheduler.Submit();
+		m_impl->layers[0]   = {frame, 0, false};
+	}
+	m_impl->Present(true);
+	return true;
+}
+
 bool Presenter::IsHdrSupported() const noexcept {
 	return m_impl->swapchain.IsHdrSupported();
 }
@@ -1668,7 +1695,7 @@ void Presenter::ClearLayer(int bus) {
 	}
 }
 
-void Presenter::Impl::Present() {
+void Presenter::Impl::Present(bool repeat) {
 	KYTY_PROFILER_FUNCTION();
 	using Common::DebugCounters::Counter;
 	using Common::DebugCounters::ScopedTimer;
@@ -1708,14 +1735,16 @@ void Presenter::Impl::Present() {
 				layer.frame->present_tick = tick;
 			}
 		}
-		status = swapchain.Present();
+		status = swapchain.Present(repeat);
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
 			continue;
 		}
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
-		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		if (!repeat) {
+			window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		}
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");

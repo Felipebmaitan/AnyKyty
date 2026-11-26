@@ -2812,6 +2812,9 @@ PipelineCache::ManifestBacklog PipelineCache::GetManifestBacklog() const {
 	backlog.threads          = static_cast<uint32_t>(state.threads.size());
 	backlog.module_seconds   = state.module_time.Get();
 	backlog.pipeline_seconds = state.pipeline_time.Get();
+	backlog.modules_found     = state.found;
+	backlog.modules_built     = state.built;
+	backlog.pipelines_created = state.pipelines + state.compute;
 	return backlog;
 }
 

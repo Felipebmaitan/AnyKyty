@@ -15,6 +15,7 @@
 #include <fmt/format.h>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 namespace Libs::Graphics {
@@ -43,6 +44,9 @@ struct Estimate {
 	uint32_t shaders  = 0;
 	uint64_t shaders_finished = 0;
 	uint32_t running  = 0;
+	uint64_t modules_found     = 0;
+	uint64_t modules_built     = 0;
+	uint64_t pipelines_created = 0;
 };
 
 }
@@ -62,6 +66,10 @@ PipelineCache::StallScope::StallScope(PipelineCache& cache, const char* what, ui
 	m_what    = what;
 	m_hash    = hash;
 	m_why     = why;
+	std::scoped_lock lock(cache.m_stall_mutex);
+	cache.m_stall.hash       = hash;
+	cache.m_stall.what       = what;
+	cache.m_stall.hash_since = m_started;
 }
 
 static const char* ComputeWrites(const ShaderModule& module) {
@@ -88,6 +96,8 @@ PipelineCache::StallScope::~StallScope() {
 		std::scoped_lock lock(m_cache.m_stall_mutex);
 		if (--m_cache.m_stall.threads == 0) {
 			m_cache.m_stall.ended = now;
+			m_cache.m_stall.hash  = 0;
+			m_cache.m_stall.what  = nullptr;
 		}
 		if (m_what != nullptr) {
 			ns           = static_cast<uint64_t>(
@@ -197,6 +207,9 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 		e.shaders          = backlog.modules;
 		e.shaders_finished = backlog.modules_done;
 		e.running          = backlog.running;
+		e.modules_found     = backlog.modules_found;
+		e.modules_built     = backlog.modules_built;
+		e.pipelines_created = backlog.pipelines_created;
 		return e;
 	};
 
@@ -212,7 +225,11 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 	uint64_t                               stall_base = 0;
 #endif
 	bool                                   shown       = false;
+#if defined(ANYPS5_KYTY)
+	uint64_t                               notice_created = 0;
+#else
 	uint64_t                               notice_base = 0;
+#endif
 	Clock::time_point                      notice_shown_at;
 	bool                                   bar_shown = false;
 	std::optional<Clock::time_point>       bar_work_since;
@@ -312,10 +329,13 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 			}
 			if (bar_shown) {
 				const auto done = static_cast<uint32_t>(finished - std::min(bar_base, finished));
-				ShowManifestProgress({.done      = done,
-				                      .total     = done + left,
-				                      .pipelines = e.pending + e.running,
-				                      .shaders   = e.shaders});
+				ShowManifestProgress({.done       = done,
+				                      .total      = done + left,
+				                      .pipelines  = e.pending + e.running,
+				                      .shaders    = e.shaders,
+				                      .cached     = e.modules_found,
+				                      .translated = e.modules_built,
+				                      .compiled   = e.pipelines_created});
 			} else {
 				HideManifestProgress();
 			}
@@ -338,23 +358,41 @@ void PipelineCache::Precompile(const std::stop_token& stop) {
 		}
 		if (!shown) {
 			shown           = true;
-			notice_base     = e.finished;
 			notice_shown_at = now;
+#if defined(ANYPS5_KYTY)
+			notice_created = m_pipelines_created.load(std::memory_order_relaxed);
+#else
+			notice_base = e.finished;
+#endif
 			PrecompileLog("Pipeline notice: shown, state {} ({} driver creations for {:.1f} s, {} pipelines pending, "
 			              "{} game threads waiting)",
 			              *state == PrecompileNoticeState::Waiting ? "waiting" : "compiling", creations.running,
 			              creations.longest, e.pending, stall.threads);
 		}
-		const auto done = static_cast<uint32_t>(e.finished - notice_base);
-		ShowPrecompileNotice({.visible          = true,
-		                      .state            = *state,
-		                      .done             = done,
-		                      .total            = done + left,
-		                      .shaders          = *state == PrecompileNoticeState::Waiting ? 0u : e.shaders,
-		                      .waited_pipelines = *state == PrecompileNoticeState::Compiling ? slow : stall.threads,
-		                      .seconds_waited   = *state == PrecompileNoticeState::Compiling
-		                                              ? static_cast<uint32_t>(creations.longest)
-		                                              : static_cast<uint32_t>(seconds(now - (stall.threads != 0 ? stall.since : stall_since)))});
+#if defined(ANYPS5_KYTY)
+		const auto     done = static_cast<uint32_t>(m_pipelines_created.load(std::memory_order_relaxed) - notice_created);
+		const uint32_t todo = std::max({left, e.pending + e.running, creations.running});
+#else
+		const auto     done = static_cast<uint32_t>(e.finished - notice_base);
+		const uint32_t todo = left;
+#endif
+		PrecompileNotice notice {.visible          = true,
+		                         .state            = *state,
+		                         .done             = done,
+		                         .total            = done + todo,
+		                         .shaders          = *state == PrecompileNoticeState::Waiting ? 0u : e.shaders,
+		                         .waited_pipelines = *state == PrecompileNoticeState::Compiling ? slow : stall.threads,
+		                         .seconds_waited   = *state == PrecompileNoticeState::Compiling
+		                                                 ? static_cast<uint32_t>(creations.longest)
+		                                                 : static_cast<uint32_t>(seconds(now - (stall.threads != 0 ? stall.since : stall_since)))};
+#if defined(ANYPS5_KYTY)
+		if (stall.threads != 0 && stall.hash != 0) {
+			notice.waiting_hash     = stall.hash;
+			notice.waiting_pipeline = stall.what != nullptr && std::string_view(stall.what).starts_with("graphics");
+			notice.waiting_seconds  = static_cast<uint32_t>(seconds(now - stall.hash_since));
+		}
+#endif
+		ShowPrecompileNotice(notice);
 	}
 	HidePrecompileNotice();
 	HideManifestProgress();
