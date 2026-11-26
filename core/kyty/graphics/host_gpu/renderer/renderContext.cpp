@@ -494,11 +494,23 @@ bool RenderContext::CacheSelfSizedBuffers(const ShaderStageRuntime& runtime) {
 }
 
 void RenderContext::CacheTlasMemory(const ShaderStageRuntime& runtime) {
-	const auto&                  program = runtime.module->info;
+	const auto&            program = runtime.module->info;
 	RayTracing::TlasSource source;
 	if (!RayTracing::FindGuestTlasSource(program.info, source)) {
 		return;
 	}
+	CacheTlasMemory(runtime, source, true);
+	if (!program.info.ray_query) {
+		return;
+	}
+	for (const auto& extra: program.info.ray_query_extra_sources) {
+		CacheTlasMemory(runtime, RayTracing::ExtraTlasSource(extra), false);
+	}
+}
+
+void RenderContext::CacheTlasMemory(const ShaderStageRuntime& runtime, const RayTracing::TlasSource& source,
+                                    bool note_instances) {
+	const auto& program   = runtime.module->info;
 	const auto& resources = *runtime.resources;
 	const auto readable = [this](uint64_t address, uint64_t size) {
 		return GuestRange {address, size}.Valid() && m_mapped_ranges.Contains(address, size) &&
@@ -541,7 +553,7 @@ void RenderContext::CacheTlasMemory(const ShaderStageRuntime& runtime) {
 			}
 		});
 	}
-	if (program.info.ray_query && m_ray_tracing->Enabled()) {
+	if (note_instances && program.info.ray_query && m_ray_tracing->Enabled()) {
 		m_ray_tracing->NoteTlasInstances(tlas.instances);
 	}
 }
@@ -1055,6 +1067,7 @@ bool RenderContext::AddRayTracingReach(const ShaderStageRuntime& runtime) {
 	uint64_t                     header    = 0;
 	uint64_t                     header_at = 0;
 	if (reach.empty() || reach.size() != 1u + uint64_t {reach[0]} * 2u || !m_ray_tracing->Enabled() ||
+	    !program.info.ray_query_extra_sources.empty() ||
 	    !RayTracing::FindGuestTlasSource(program.info, source) ||
 	    !GuestTlasHeader(runtime, source, header, header_at)) {
 		return false;

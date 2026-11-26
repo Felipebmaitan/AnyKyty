@@ -11,7 +11,12 @@ using ShaderRecompiler::IR::IoAll;
 using ShaderRecompiler::IR::Writer;
 
 struct LegacyWriter: Writer {
-	static constexpr bool shader_info_has_relative_vgprs = false;
+	static constexpr bool shader_info_has_relative_vgprs          = false;
+	static constexpr bool shader_info_has_ray_query_extra_sources = false;
+};
+
+struct NoExtraSourcesWriter: Writer {
+	static constexpr bool shader_info_has_ray_query_extra_sources = false;
 };
 
 void Write(std::ostream& output, const auto& bytes) {
@@ -86,6 +91,11 @@ int main() {
 	Write(previous, previous_header.bytes);
 	WriteModule(previous, 0x102, 0x201, ShaderType::Vertex, vertex, {});
 	WriteModule(previous, 0x101, 0x201, ShaderType::Vertex, vertex, {});
+	std::ofstream no_extra("no-extra-sources.shaders", std::ios::binary);
+	Write(no_extra, header.bytes);
+	WriteModule<NoExtraSourcesWriter>(no_extra, 0x102, 0x201, ShaderType::Vertex, vertex, {});
+	WriteModule<NoExtraSourcesWriter>(no_extra, 0x101, 0x201, ShaderType::Vertex, vertex, {});
+	no_extra.close();
 
 	std::ofstream malformed("malformed.shaders", std::ios::binary);
 	Write(malformed, header.bytes);
