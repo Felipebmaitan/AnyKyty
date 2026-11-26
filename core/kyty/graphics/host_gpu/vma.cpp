@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <cinttypes>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -236,6 +238,23 @@ uint32_t GraphicContext::GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> 
 	return count;
 }
 
+static uint64_t MemoryBudgetCap() {
+	static const uint64_t cap = [] {
+		const char* value = std::getenv("KYTY_MEMORY_BUDGET_MB");
+		if (value == nullptr || value[0] == '\0') {
+			return UINT64_MAX;
+		}
+		char*      end = nullptr;
+		const auto mib = std::strtoull(value, &end, 10);
+		if (end == value || *end != '\0' || mib == 0) {
+			std::fprintf(stderr, "KYTY_MEMORY_BUDGET_MB: '%s' is not a positive number of MiB; ignored\n", value);
+			return UINT64_MAX;
+		}
+		return mib << 20u;
+	}();
+	return cap;
+}
+
 uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	if (allocator == nullptr) {
 		return 0;
@@ -260,11 +279,12 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 		}
 	}
 	if (discrete) {
-		return budget - std::min<uint64_t>(budget / 8, 1024ull * 1024 * 1024);
+		return std::min(budget - std::min<uint64_t>(budget / 8, 1024ull * 1024 * 1024), MemoryBudgetCap());
 	}
 	constexpr uint64_t system_reserve = 8ull * 1024 * 1024 * 1024;
 	const auto         available      = budget > usage ? budget - usage : uint64_t {0};
-	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
+	return std::min(std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0}),
+	                MemoryBudgetCap());
 }
 
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
