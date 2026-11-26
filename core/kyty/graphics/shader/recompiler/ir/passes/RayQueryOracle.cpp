@@ -161,9 +161,52 @@ bool LeaveAfter(Block& exit, Block& stay, Value next, uint32_t limit) {
 	return true;
 }
 
+bool ZeroAvailable(Type type) {
+	switch (type) {
+		case Type::U1:
+		case Type::U8:
+		case Type::U16:
+		case Type::U32:
+		case Type::U64:
+		case Type::F16:
+		case Type::F32:
+		case Type::F64:
+		case Type::U32x2:
+		case Type::U32x3:
+		case Type::U32x4:
+		case Type::F32x2: return true;
+		default: return false;
+	}
+}
+
+Value ZeroOf(Block& block, Type type) {
+	const auto at = [&](ValueOpcode op, std::initializer_list<Value> args) {
+		return Value(&*block.PrependNewInst(block.end(), op, args));
+	};
+	switch (type) {
+		case Type::U1: return Value(false);
+		case Type::U8: return Value(uint8_t {0});
+		case Type::U16: return Value(uint16_t {0});
+		case Type::U32: return Value(0u);
+		case Type::U64: return Value(uint64_t {0});
+		case Type::F16: return at(ValueOpcode::BitCastF16U16, {Value(uint16_t {0})});
+		case Type::F32: return at(ValueOpcode::BitCastF32U32, {Value(0u)});
+		case Type::F64: return at(ValueOpcode::BitCastF64U64, {Value(uint64_t {0})});
+		case Type::U32x2: return at(ValueOpcode::CompositeConstructU32x2, {Value(0u), Value(0u)});
+		case Type::U32x3: return at(ValueOpcode::CompositeConstructU32x3, {Value(0u), Value(0u), Value(0u)});
+		case Type::U32x4: return at(ValueOpcode::CompositeConstructU32x4, {Value(0u), Value(0u), Value(0u), Value(0u)});
+		case Type::F32x2: {
+			const auto zero = at(ValueOpcode::BitCastF32U32, {Value(0u)});
+			return at(ValueOpcode::CompositeConstructF32x2, {zero, zero});
+		}
+		default: return {};
+	}
+}
+
 bool BoundLoop(Program& program, Block& header, uint32_t limit) {
 	const auto first = BlockAt(program, &header);
 	const auto last  = BlockAt(program, header.terminator.continue_block);
+	auto*      merge = header.terminator.merge_block;
 	Block*     latch = nullptr;
 	for (auto* pred: header.ImmPredecessors()) {
 		const auto at = BlockAt(program, pred);
@@ -171,37 +214,19 @@ bool BoundLoop(Program& program, Block& header, uint32_t limit) {
 		if (latch != nullptr) return false;
 		latch = pred;
 	}
-	if (latch == nullptr) return false;
-	Block* exit = nullptr;
-	Block* stay = nullptr;
-	if (latch->terminator.kind == CFG::TerminatorKind::ConditionalBranch &&
-	    (latch->terminator.true_block == &header || latch->terminator.false_block == &header)) {
-		exit = latch;
-		stay = &header;
-	} else {
-		auto* merge = header.terminator.merge_block;
-		auto* at    = &header;
-		for (size_t steps = 0; at != nullptr && at != latch && steps <= last - first; ++steps) {
-			const auto index = BlockAt(program, at);
-			if (index < first || index > last) break;
-			const auto& term = at->terminator;
-			if (term.kind == CFG::TerminatorKind::Branch) {
-				at = at != &header && term.loop_header && term.merge_block != nullptr ? term.merge_block : term.true_block;
-				continue;
-			}
-			if (term.kind != CFG::TerminatorKind::ConditionalBranch) break;
-			if (term.true_block != merge && term.false_block != merge && term.merge_block != nullptr &&
-			    (term.loop_header || BlockAt(program, term.merge_block) > index)) {
-				at = term.merge_block;
-				continue;
-			}
-			if (term.true_block == merge) stay = term.false_block;
-			if (term.false_block == merge) stay = term.true_block;
-			if (stay != nullptr && stay != merge) exit = at;
-			break;
+	if (latch == nullptr || merge == nullptr || merge == &header) return false;
+	auto&      term        = latch->terminator;
+	const bool conditional = term.kind == CFG::TerminatorKind::ConditionalBranch && !latch->condition.IsEmpty() &&
+	                         (term.true_block == &header || term.false_block == &header);
+	const bool plain       = term.kind == CFG::TerminatorKind::Branch && term.true_block == &header &&
+	                         std::ranges::find(latch->ImmSuccessors(), merge) == latch->ImmSuccessors().end();
+	if (!conditional && !plain) return false;
+	if (plain) {
+		for (const auto& inst: *merge) {
+			if (inst.GetOpcode() != ValueOpcode::Phi) break;
+			if (!ZeroAvailable(inst.GetType())) return false;
 		}
 	}
-	if (exit == nullptr || stay == nullptr || exit->condition.IsEmpty()) return false;
 	auto& count = *header.PrependNewInst(header.begin(), ValueOpcode::Phi);
 	count.SetFlags(Type::U32);
 	const auto body = std::ranges::find_if(header, [](const Inst& inst) { return inst.GetOpcode() != ValueOpcode::Phi; });
@@ -209,7 +234,17 @@ bool BoundLoop(Program& program, Block& header, uint32_t limit) {
 	for (auto* pred: header.ImmPredecessors()) {
 		count.AddPhiOperand(pred, pred == latch ? Value(&next) : Value(0u));
 	}
-	return LeaveAfter(*exit, *stay, Value(&next), limit);
+	if (conditional) return LeaveAfter(*latch, header, Value(&next), limit);
+	for (auto& inst: *merge) {
+		if (inst.GetOpcode() != ValueOpcode::Phi) break;
+		inst.AddPhiOperand(latch, ZeroOf(*latch, inst.GetType()));
+	}
+	latch->condition = Value(&*latch->PrependNewInst(latch->end(), ValueOpcode::ULessThan32, {Value(&next), Value(limit)}));
+	term.kind        = CFG::TerminatorKind::ConditionalBranch;
+	term.true_block  = &header;
+	term.false_block = merge;
+	latch->AddBranch(merge);
+	return true;
 }
 
 bool Unserved(const Inst& inst) {
@@ -221,7 +256,7 @@ bool Unserved(const Inst& inst) {
 
 bool NativeWork(const Inst& inst) {
 	const auto op = inst.GetOpcode();
-	return op == ValueOpcode::RayQueryProceed ||
+	return op == ValueOpcode::RayQueryProceed || op == ValueOpcode::RayQueryNext ||
 	       (op == ValueOpcode::BvhIntersect && (inst.Flags<uint32_t>() & BvhIntersectNative) != 0);
 }
 
@@ -246,15 +281,19 @@ size_t MarkWalksEmpty(Program& program) {
 }
 
 EmptyWalkBounds BoundEmptyWalks(Program& program, uint32_t limit, uint32_t native_limit) {
+	EmptyWalkBounds     bounds;
 	std::vector<Block*> headers;
 	for (auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			if (!Unserved(inst)) continue;
+			if (program.dispatcher_fallback) {
+				++bounds.refused;
+				continue;
+			}
 			auto* header = InnermostLoop(program, block);
 			if (header != nullptr && std::ranges::find(headers, header) == headers.end()) headers.push_back(header);
 		}
 	}
-	EmptyWalkBounds bounds;
 	for (auto* header: headers) {
 		const auto first  = BlockAt(program, header);
 		const auto last   = BlockAt(program, header->terminator.continue_block);
