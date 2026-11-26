@@ -8,6 +8,10 @@ import sys
 
 GUEST_ENTRY = re.compile(r"\[kyty-startup\] guest_entry monotonic_ns=(\d+)$")
 GUEST_WORK = re.compile(r"\[kyty-startup\] first_(?:draw|dispatch) monotonic_ns=(\d+)$")
+PREPARATION_RELEASE = re.compile(r"\[kyty-startup\] preparation_released monotonic_ns=(\d+)$")
+MANIFEST_RELEASE = re.compile(
+    r"\[kyty-startup\] manifest_release monotonic_ns=(\d+) result=(\w+) .* jobs_finished=(\d+) jobs_total=(\d+)$"
+)
 AUDIT_ENABLED = "[kyty-startup] precook_audit shader_variants=1 driver_pipeline=1"
 SHADER_BUILD = re.compile(r"\[kyty-variant\] build .* @(\d+)$")
 PIPELINE_MISS = re.compile(r"\[kyty-startup\] runtime_pipeline .* route=(.+?) variant=\S+ shader=\S+ monotonic_ns=(\d+)$")
@@ -20,6 +24,8 @@ DRIVER_AUDIT = re.compile(
 def summarize(path):
     guest_entry = None
     audit_enabled = False
+    preparation_release = None
+    manifest_releases = []
     work = []
     shaders = []
     misses = []
@@ -33,6 +39,11 @@ def summarize(path):
                 guest_entry = int(match[1])
             elif line.endswith(AUDIT_ENABLED):
                 audit_enabled = True
+            elif match := PREPARATION_RELEASE.search(line):
+                preparation_release = int(match[1])
+            elif match := MANIFEST_RELEASE.search(line):
+                time, result, finished, total = match.groups()
+                manifest_releases.append(dict(monotonic_ns=int(time), result=result, finished=int(finished), total=int(total)))
             elif match := GUEST_WORK.search(line):
                 work.append(int(match[1]))
             elif match := SHADER_BUILD.search(line):
@@ -56,9 +67,13 @@ def summarize(path):
     translated = sum(time >= guest_entry for time in shaders)
     guest_work_observed = any(time >= guest_entry for time in work)
     audit_observed = any(event[3] != "unverified" for event in driver)
+    startup = max((event for event in manifest_releases if event["monotonic_ns"] < guest_entry),
+                  key=lambda event: event["monotonic_ns"], default=None)
     return {
         "guest_work_observed": guest_work_observed,
         "audit_enabled": audit_enabled,
+        "preparation_released_before_guest": preparation_release is not None and preparation_release <= guest_entry,
+        "manifest_release_before_guest": startup,
         "driver_audit_observed": audit_observed,
         "guest_shader_builds": translated,
         "guest_pipeline_miss_routes": dict(sorted(miss_counts.items())),
