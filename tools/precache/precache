@@ -91,6 +91,62 @@ def inventory(args, binary):
     return subprocess.run(graphics).returncode
 
 
+def existing_compute_programs(paths):
+    known = set()
+    for path in paths:
+        with path.open() as stream:
+            if stream.readline().strip() != '# kyty pipeline manifest v1':
+                raise ValueError(f'unsupported pipeline manifest {path}')
+            for line in stream:
+                parts = line.split(maxsplit=3)
+                if len(parts) < 3 or parts[0] != 'M' or parts[2] != 'cs':
+                    continue
+                match = re.search(r'(?:^|\s)code=([0-9a-f]{16})(?:\s|$)', line)
+                if match is None:
+                    raise ValueError(f'invalid compute module in {path}')
+                known.add(match[1])
+    return known
+
+
+def reflected_texture_count(shader):
+    if 'reflected_texture_count' in shader:
+        count = shader['reflected_texture_count']
+        if type(count) is not int or count < 0:
+            raise ValueError('invalid reflected texture count')
+        return count
+    resources = shader.get('resources')
+    if resources is None or any('kind' not in row or 'category' not in row for row in resources):
+        return None
+    return sum((row['kind'], row['category']) in ((2, 0), (12, 1)) for row in resources)
+
+
+def select_compute_programs(args):
+    inventory = json.loads(args.inventory.read_text())
+    recipes = {f'{digest:016x}' for digest in read_recipes(args.recipes, None)}
+    candidates = recipes - existing_compute_programs(args.existing)
+    counts = defaultdict(set)
+    for bundle in inventory['bundles']:
+        for effect in bundle['effects']:
+            for shader_pass in effect['passes']:
+                shader = shader_pass['shaders'].get('cs')
+                if shader is not None and shader['code'] in candidates:
+                    counts[shader['code']].add(reflected_texture_count(shader))
+
+    ranked = []
+    for digest, declarations in counts.items():
+        count = None if None in declarations else max(declarations)
+        if not args.texture_free or count == 0:
+            ranked.append((count is None, count or 0, digest))
+    ranked.sort()
+    selection = ''.join(f'{digest}\n' for _, _, digest in ranked[:args.limit])
+    if args.output:
+        with args.output.open('x', encoding='utf-8') as stream:
+            stream.write(selection)
+    else:
+        sys.stdout.write(selection)
+    return 0
+
+
 def prepare(args, binary):
     selected = set(args.select.read_text().split()) if args.select else None
     recipes = read_recipes(args.recipes, selected)
@@ -236,6 +292,15 @@ def main():
                       help='resolve detached shader headers with verified creation argument file offsets')
     scan.add_argument('--graphics-bundle', type=Path, metavar='ASSET',
                       help='also export shipped shader stage pairs and render-state selections from a readable effect bundle')
+    select = commands.add_parser('select', help='select shipped compute pass programs for prepare --select')
+    select.add_argument('inventory', type=Path, help='shipped effect inventory JSON')
+    select.add_argument('recipes', type=Path, help='validated compute creation recipes')
+    select.add_argument('--existing', action='append', type=Path, default=[], metavar='MANIFEST',
+                        help='exclude compute program identities present in this pipeline manifest')
+    select.add_argument('--texture-free', action='store_true',
+                        help='require reflection with no declared textures for every shipped use')
+    select.add_argument('--limit', type=int, metavar='COUNT', help='limit the selection after ranking by declared textures')
+    select.add_argument('--output', type=Path, metavar='FILE', help='write the selected program IDs to a new file')
     prep = commands.add_parser('prepare')
     prep.add_argument('store', type=Path)
     prep.add_argument('recipes', type=Path)
@@ -250,6 +315,13 @@ def main():
     gpu.add_argument('--denylist', type=Path)
     gpu.add_argument('--gpu-lock', type=Path, required=True)
     args = parser.parse_args()
+    if args.command == 'select':
+        if args.limit is not None and args.limit <= 0:
+            select.error('--limit must be positive')
+        try:
+            return select_compute_programs(args)
+        except (KeyError, OSError, ValueError) as error:
+            select.error(str(error))
     binary = args.binary.resolve(strict=True)
     if args.command == 'inventory':
         return inventory(args, binary)

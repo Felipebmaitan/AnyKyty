@@ -13,17 +13,26 @@ TEXTURE_DIMENSIONS = {
     (2, True): "CubeArray",
     (3, False): "3D",
 }
+TEXTURE_TYPES = {(2, 0), (12, 1)}
+
+
+def resource_type(word):
+    return word & 15, (word >> 4) & 3
+
+
+def reflected_texture_count(table, count):
+    return sum(resource_type(struct.unpack_from("<H", table, 8 + 24 * index)[0]) in TEXTURE_TYPES
+               for index in range(count))
 
 
 def reflected_resources(table, count):
     result = []
     for index in range(count):
         kind_and_shape, slot, _, _, flags = struct.unpack_from("<H4B", table, 8 + 24 * index)
-        kind = kind_and_shape & 15
-        category = (kind_and_shape >> 4) & 3
+        kind, category = resource_type(kind_and_shape)
         shape = (kind_and_shape >> 8) & 15
         array = bool(kind_and_shape & 64)
-        dimension = TEXTURE_DIMENSIONS.get((shape, array)) if (kind, category) in ((2, 0), (12, 1)) else None
+        dimension = TEXTURE_DIMENSIONS.get((shape, array)) if (kind, category) in TEXTURE_TYPES else None
         result.append(dict(serialized_type=kind_and_shape, serialized_slot=slot, flags=flags,
                            kind=kind, category=category, shape=shape, array=array, texture_dimension=dimension))
     return result

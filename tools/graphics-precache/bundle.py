@@ -8,7 +8,8 @@ from pathlib import Path
 
 from catalog import xxhash
 from pass_coverage import compare_manifest_states, index_pass_states
-from resource_coverage import compare_manifest_resources, index_declared_dimensions, reflected_resources
+from resource_coverage import (compare_manifest_resources, index_declared_dimensions, reflected_resources,
+                               reflected_texture_count)
 from session import fields, read_manifest
 
 
@@ -50,13 +51,16 @@ class BundleReader:
         if not name or name[-1] or b"\0" in name[:-1]:
             raise ValueError("invalid length-prefixed name")
 
-    def reflection(self, size=None, include_resources=False):
+    def reflection(self, size=None, *, shader=False):
         table = self.sized() if size is None else self.take(size)
         resources, members, auxiliary, declared = struct.unpack_from("<4H", table)
         if declared != len(table) or 8 + 24 * (resources + members) + 8 * auxiliary > len(table):
             raise ValueError("invalid reflection table size")
-        if include_resources:
-            return reflected_resources(table, resources)
+        if shader:
+            result = {"reflected_texture_count": reflected_texture_count(table, resources)}
+            if self.include_resources:
+                result["resources"] = reflected_resources(table, resources)
+            return result
 
     def shader(self, hash64, *, metadata_bytes=152):
         self.name()
@@ -77,11 +81,8 @@ class BundleReader:
             raise ValueError("invalid native shader program extent")
         program = archive[16 + header_size:16 + header_size + length]
         self.skip(metadata_bytes)
-        resources = self.reflection(include_resources=self.include_resources)
-        result = {"code": f"{hash64(program, length):016x}", "native_kind": archive[16 + 90], "version": version}
-        if resources is not None:
-            result["resources"] = resources
-        return result
+        return {"code": f"{hash64(program, length):016x}", "native_kind": archive[16 + 90], "version": version,
+                **self.reflection(shader=True)}
 
 
 def align16(size):
