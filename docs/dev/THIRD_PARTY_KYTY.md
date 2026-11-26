@@ -287,7 +287,7 @@ This build does not read KytyPS5's `KYTY_PIPELINE_PRECOMPILE`: stopping the game
 | `KYTY_SESSION_LOG` | path | empty | Session log file, opened at start with a header | debug | all | Kyty option |
 | `KYTY_SHADER_LOG_DIRECTION` | `Silent`, `Console`, `File`, any case, else stops | `Silent` | Anything but `Silent` makes the recompiler dump its IR; the shader dumps go under `KYTY_SHADER_LOG_FOLDER` | debug | all | Kyty option |
 | `KYTY_SHADER_LOG_FOLDER` | path | `_Shaders` | Folder of the shader dumps | debug | all | Kyty option |
-| `KYTY_CAPTURE_QUEUED_PIPELINES` | set to enable | unset | Adds queued graphics pipelines and their shader inputs to the manifest capture. Requires an active manifest recording path | debug | all | AnyKyty |
+| `KYTY_CAPTURE_QUEUED_PIPELINES` | set to enable | unset | Logs graphics pipeline recipes and their shader inputs when queued or created. Requires an active manifest recording path | debug | all | AnyKyty |
 | `KYTY_COMMAND_BUFFER_DUMP` | `0` or `1`, else stops | `0` | Writes each command buffer the title submits to a file under `KYTY_COMMAND_BUFFER_DUMP_FOLDER`, named by frame and number | debug | all | Kyty option |
 | `KYTY_COMMAND_BUFFER_DUMP_FOLDER` | path | `_Buffers` | Folder of the command buffer dumps | debug | all | Kyty option |
 | `KYTY_GRAPHICS_DEBUG_DUMP` | `0` or `1`, else stops | `0` | Emits debug info in the shaders and turns the shader store off; with `KYTY_PRINTF_DIRECTION` not `Silent`, logs each draw's registers and the address, format, size, pitch and tile mode of every texture its stages read, and each direct dispatch with its buffers and textures | debug | all | Kyty option |
@@ -301,6 +301,14 @@ This build does not read KytyPS5's `KYTY_PIPELINE_PRECOMPILE`: stopping the game
 | `KYTY_AB` | `<seconds>:<setting>[+<setting>...]`, else stops | unset | In-run A/B: alternates phase A (the listed settings as the environment sets them) and phase B (the listed settings turned over) at flips, each phase at least `<seconds>` long (1 or more). The execution thread changes them right after a flip's submission, between two submissions. It prints `[kyty-ab]` lines: both arms at the start, each phase's begin and its settled point, and at the end of a phase its settled part: presents, img/s, longest frame, frames of 50 ms or more, with the wall clock. A setting that cannot change while the title runs and a name listed twice stop at start with a message that lists the settings it can change: `KYTY_GENERIC_COMPUTE_VARIANT` (see [Details](#details)). `python3 tools/kyty_ab_report.py <session>` gives each arm | debug | all | AnyKyty |
 | `KYTY_AB_SETTLE` | seconds, shorter than the phase, else stops | `2` | Seconds into a phase after which `KYTY_AB` counts it: its settled line, then its presents and img/s until the next phase | debug | all | AnyKyty |
 | `KYTY_AB_START` | flip count from 1, or `<n>s`, else stops | `0` | Flip at which `KYTY_AB` starts, or `<n>s` for `<n>` seconds after the first flip | debug | all | AnyKyty |
+
+With `KYTY_CAPTURE_QUEUED_PIPELINES` enabled, collect the complete graphics recipes from one or more logs for the same title and version. Pass `--manifest` once per existing manifest to merge its recorded recipes with the captures.
+
+```sh
+python3 tools/graphics-precache/collect.py run.log --manifest recorded.kpm --output merged.kpm
+```
+
+The collector reports missing dependencies and interrupted captures. Install `merged.kpm` as `_PipelineCache/<title id>_<version>.kpm` alongside the matching `.code` store, then run `kyty_precache` before launching the title. Keep the captured logs and derived cache files local.
 
 ### AnyPS5 settings that an AnyKyty session also reads
 
