@@ -483,13 +483,26 @@ static void PrepareDrawRayTracing(RenderContext& context, CommandBuffer& buffer,
 			preparation.header = uint64_t {words[source.header_slots[0]]} | uint64_t {words[source.header_slots[1]]} << 32u;
 		}
 	}
-	if (known && native_rt->Prepared(preparation)) {
+	const auto& extras = info.ray_query_extra_sources;
+	if (extras.empty() && known && native_rt->Prepared(preparation)) {
 		return;
 	}
 	buffer.EndRendering();
 	native_rt->Prepare(buffer.Handle(), pointer, source, bindings.flattened_srt, frame, module.info.shader_hash);
-	if (known) {
+	if (extras.empty() && known) {
 		native_rt->KeepPrepared(preparation);
+	}
+	for (uint32_t index = 0; index < extras.size(); index++) {
+		const auto extra = RayTracing::ExtraTlasSource(extras[index]);
+		if (extra.user_sgpr + 1 >= HW::UserSgprInfo::SGPRS_MAX) {
+			native_rt->InvalidateContext(buffer.Handle(), index + 1);
+			continue;
+		}
+		const auto extra_pointer = RayTracing::UserPointer(
+		    extra, uint64_t {user[extra.user_sgpr]} | (uint64_t {user[extra.user_sgpr + 1]} << 32u),
+		    [&](uint64_t address, uint64_t size) { return context.IsMapped(address, size); });
+		native_rt->Prepare(buffer.Handle(), extra_pointer, extra, bindings.flattened_srt, frame, module.info.shader_hash,
+		                   false, false, index + 1);
 	}
 }
 

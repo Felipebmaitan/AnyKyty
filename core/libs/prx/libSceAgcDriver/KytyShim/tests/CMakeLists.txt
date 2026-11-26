@@ -342,6 +342,14 @@ target_include_directories(kyty_shim_rt_oracle_tests SYSTEM PRIVATE ${CMAKE_SOUR
 target_link_libraries(kyty_shim_rt_oracle_tests PRIVATE Kyty::gpu libkernel libc)
 add_test(NAME kyty_shim_rt_oracle COMMAND kyty_shim_rt_oracle_tests)
 set_tests_properties(kyty_shim_rt_oracle PROPERTIES TIMEOUT 20)
+add_test_executable(kyty_shim_rt_context_pick_tests ${CMAKE_CURRENT_SOURCE_DIR}/RtContextPick.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
+target_include_directories(kyty_shim_rt_context_pick_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_include_directories(kyty_shim_rt_context_pick_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Tools/include)
+configure_host_test_executable(kyty_shim_rt_context_pick_tests)
+target_link_libraries(kyty_shim_rt_context_pick_tests PRIVATE Kyty::gpu libkernel libc)
+add_test(NAME kyty_shim_rt_context_pick COMMAND kyty_shim_rt_context_pick_tests)
+set_tests_properties(kyty_shim_rt_context_pick PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
+        PASS_REGULAR_EXPRESSION "kyty_shim_rt_context_pick: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
 
 add_test_executable(kyty_shim_rt_check_tests ${CMAKE_CURRENT_SOURCE_DIR}/RtCheck.cpp)
 target_include_directories(kyty_shim_rt_check_tests PRIVATE ${LIBS_INCLUDE_DIR})

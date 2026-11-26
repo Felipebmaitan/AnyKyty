@@ -671,6 +671,16 @@ struct Bindings {
 	bool operator==(const Bindings& other) const = default;
 };
 
+struct RayQueryExtraSource {
+	uint32_t                user_sgpr     = 0;
+	uint32_t                header_offset = 0;
+	uint32_t                header_vsharp = 0xffffffffu;
+	uint32_t                root          = 0;
+	std::array<uint32_t, 4> layout {};
+
+	bool operator==(const RayQueryExtraSource& other) const = default;
+};
+
 struct ShaderInfo {
 	static constexpr uint32_t NoRayQuerySlot  = 0xffffffffu;
 	static constexpr uint32_t UserDataRayQueryHeader = 0xffffffffu;
@@ -770,6 +780,7 @@ struct ShaderInfo {
 	bool                            coherent_buffers              = false;
 	bool                            float64                       = false;
 	bool                            float16                       = false;
+	std::vector<RayQueryExtraSource> ray_query_extra_sources;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };

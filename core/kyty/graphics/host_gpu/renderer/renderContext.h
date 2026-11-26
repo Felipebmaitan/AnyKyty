@@ -121,6 +121,7 @@ public:
 
 private:
 	void CacheTlasMemory(const ShaderStageRuntime& runtime);
+	void CacheTlasMemory(const ShaderStageRuntime& runtime, const RayTracing::TlasSource& source, bool note_instances);
 	[[nodiscard]] bool SynchronizeDmaReach(std::span<const ShaderStageRuntime* const> stages);
 	[[nodiscard]] bool AddRecordReach(const ShaderStageRuntime& runtime);
 	[[nodiscard]] bool AddRayTracingReach(const ShaderStageRuntime& runtime);

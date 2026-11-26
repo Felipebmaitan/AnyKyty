@@ -5706,8 +5706,31 @@ NativeTraversals TraceNativeTraversals(Program& program, const NativeTraversalOp
 		walk.source.layout = reference.layout;
 		return true;
 	};
+	std::vector<RayQueryExtraSource> extra_sources;
+	const auto                       separate = [&](Walk& each) {
+		const auto& source = each.Shape().source;
+		if (each.kind == Kind::Universal || source.layout[3] != reference.layout[3] ||
+		    (source.layout[1] >> 30u) != (reference.layout[1] >> 30u)) {
+			return false;
+		}
+		const RayQueryExtraSource extra {source.user_sgpr, source.header_offset, source.header_vsharp, source.root,
+		                                 source.layout};
+		if (std::ranges::find(extra_sources, extra) != extra_sources.end()) return true;
+		const auto same_header = [&](uint32_t user_sgpr, uint32_t header_offset, uint32_t header_vsharp) {
+			return user_sgpr == source.user_sgpr && header_offset == source.header_offset && header_vsharp == source.header_vsharp;
+		};
+		if (same_header(reference.user_sgpr, reference.header_offset, reference.header_vsharp) ||
+		    std::ranges::any_of(extra_sources, [&](const RayQueryExtraSource& other) {
+			    return same_header(other.user_sgpr, other.header_offset, other.header_vsharp);
+		    })) {
+			return false;
+		}
+		if (extra_sources.size() + 1 >= MaxRayQuerySources) return false;
+		extra_sources.push_back(extra);
+		return true;
+	};
 	std::erase_if(walks, [&](Walk& walk) {
-		if (shares(walk)) return false;
+		if (shares(walk) || separate(walk)) return false;
 		const auto kept = std::ranges::count_if(intersections, [&](const Inst* bvh) { return InLoop(program, bvh->Parent(), walk.header, walk.latch); });
 		LOGF("%s universal ray tracing: hash=0x%016llx keeps %zu intersections on the guest walk: another walk of the program names another source or layout\n",
 		     compute ? "CS" : "PS", static_cast<unsigned long long>(program.shader_hash), static_cast<size_t>(kept));
@@ -5717,11 +5740,12 @@ NativeTraversals TraceNativeTraversals(Program& program, const NativeTraversalOp
 		MarkEmptyWalk(program, intersections, options);
 		return result;
 	}
-	result       = walks.front().Shape().source;
-	result.reach = {};
+	result               = reference;
+	result.reach         = {};
+	result.extra_sources = std::move(extra_sources);
 	std::ranges::stable_partition(walks, [](const Walk& walk) { return walk.kind != Kind::Universal; });
 	const auto shaped  = static_cast<size_t>(std::ranges::count_if(walks, [](const Walk& walk) { return walk.kind != Kind::Universal; }));
-	const auto sites   = options.rewrite ? std::min<size_t>(shaped, MaxRayQuerySites) + (walks.size() - shaped) : 0;
+	const auto sites   = options.rewrite ? std::min<size_t>(std::min<size_t>(shaped, MaxRayQuerySites) + (walks.size() - shaped), MaxRayQuerySites) : 0;
 	const auto covered = sites == walks.size() && std::ranges::all_of(intersections, [&](const Inst* other) {
 		                     return inside(other->Parent());
 	                     });
@@ -5734,8 +5758,11 @@ NativeTraversals TraceNativeTraversals(Program& program, const NativeTraversalOp
 	for (size_t index = 0; index < sites; ++index) {
 		const auto at   = index < std::min<size_t>(shaped, MaxRayQuerySites) ? index : shaped + (index - std::min<size_t>(shaped, MaxRayQuerySites));
 		auto&      walk = walks[at];
-		const auto site = static_cast<uint32_t>(at);
-		if (walk.kind == Kind::Universal || (options.oracle & OracleForms) != 0) {
+		const auto site = static_cast<uint32_t>(index);
+		const auto& walk_source = walk.Shape().source;
+		const bool  primary     = walk_source.user_sgpr == result.user_sgpr && walk_source.header_offset == result.header_offset &&
+		                     walk_source.header_vsharp == result.header_vsharp && walk_source.root == result.root;
+		if (walk.kind == Kind::Universal || ((options.oracle & OracleForms) != 0 && primary)) {
 			std::vector<Inst*> served;
 			for (auto* bvh: intersections) {
 				if (InLoop(program, bvh->Parent(), walk.header, walk.latch)) served.push_back(bvh);
