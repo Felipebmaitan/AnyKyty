@@ -163,6 +163,8 @@ configure_file("${KYTY_DIR}/cmake/kytyGitVersion.h.in" "${KYTY_GENERATED_DIR}/ky
 
 set(kytyPipelineDir "${KYTY_DIR}/graphics/host_gpu/renderer/pipeline")
 set(kytyStorePipelineSources
+    pipelineCache.cpp
+    pipelineManifest.cpp
     pipelineProgramHash.cpp
     pipelineSerialization.cpp
     pipelineShaderModule.cpp
