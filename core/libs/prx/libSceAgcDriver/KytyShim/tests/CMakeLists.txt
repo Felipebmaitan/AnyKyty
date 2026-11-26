@@ -662,6 +662,17 @@ add_test(NAME kyty_shim_flattened_srt_uniform COMMAND kyty_shim_flattened_srt_un
 set_tests_properties(kyty_shim_flattened_srt_uniform PROPERTIES TIMEOUT 60
         PASS_REGULAR_EXPRESSION "kyty_shim_flattened_srt_uniform: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
 
+add_test_executable(kyty_shim_indirect_buffer_dst_sel_tests ${CMAKE_CURRENT_SOURCE_DIR}/IndirectBufferDstSel.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
+target_include_directories(kyty_shim_indirect_buffer_dst_sel_tests PRIVATE ${LIBS_INCLUDE_DIR})
+configure_host_test_executable(kyty_shim_indirect_buffer_dst_sel_tests)
+if(MINGW)
+    target_link_libraries(kyty_shim_indirect_buffer_dst_sel_tests PRIVATE stdc++ gcc_eh)
+endif()
+target_link_libraries(kyty_shim_indirect_buffer_dst_sel_tests PRIVATE Kyty::gpu libkernel libc)
+add_test(NAME kyty_shim_indirect_buffer_dst_sel COMMAND kyty_shim_indirect_buffer_dst_sel_tests)
+set_tests_properties(kyty_shim_indirect_buffer_dst_sel PROPERTIES TIMEOUT 60
+        PASS_REGULAR_EXPRESSION "kyty_shim_indirect_buffer_dst_sel: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+
 add_test_executable(kyty_shim_uniform_scalar_loads_tests ${CMAKE_CURRENT_SOURCE_DIR}/UniformScalarLoads.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
 target_include_directories(kyty_shim_uniform_scalar_loads_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_include_directories(kyty_shim_uniform_scalar_loads_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Tools/include)
