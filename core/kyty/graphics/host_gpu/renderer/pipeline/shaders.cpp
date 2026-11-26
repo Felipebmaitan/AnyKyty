@@ -31,6 +31,7 @@
 #if defined(ANYPS5_KYTY)
 #include <cstdlib>
 #include <optional>
+#include <string_view>
 #endif
 #include <fmt/format.h>
 #include <span>
@@ -89,6 +90,47 @@ public:
 private:
 	int m_slot = -1;
 };
+
+#if defined(ANYPS5_KYTY)
+vk::Result CreateAuditedPipeline(const GraphicContext& graphics, const char* kind, uint64_t variant,
+                                 vk::PipelineCreateFlags flags, vk::Pipeline& out, auto&& create) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_PIPELINE_COMPILE_AUDIT");
+		return value != nullptr && std::string_view(value) == "1";
+	}();
+	if (!enabled) {
+		return create(flags);
+	}
+
+	constexpr auto no_compile = vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequired;
+	const bool     lookup     = static_cast<bool>(flags & no_compile);
+	const auto     log        = [&](const char* event, vk::Result result) {
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[kyty-driver-pipeline] kind={} variant={:016x} mode={} event={} result={} monotonic_ns={}\n",
+		    kind, variant, lookup ? "lookup" : "create", event, vk::to_string(result), SteadyNs()));
+	};
+	if (!graphics.pipeline_cache_lookup_enabled) {
+		log("unverified", vk::Result::eErrorFeatureNotPresent);
+		return create(flags);
+	}
+
+	const auto probe = create(flags | no_compile);
+	if (probe == vk::Result::eSuccess && out) {
+		log("no_compile", probe);
+		return probe;
+	}
+	const bool compile_required = probe == vk::Result::ePipelineCompileRequired;
+	log(compile_required ? "compile_required" : "unverified", probe);
+	if (lookup) {
+		return probe;
+	}
+	if (out) {
+		graphics.device.destroyPipeline(out, nullptr);
+		out = nullptr;
+	}
+	return create(flags);
+}
+#endif
 
 }
 
@@ -477,11 +519,15 @@ public:
 	vk::Result Create(vk::PipelineCache cache, vk::PipelineLayout layout, vk::PipelineCreateFlags flags,
 	                  vk::Pipeline& out) {
 		pipeline_info.layout = layout;
-		pipeline_info.flags  = flags;
 		const ScopedDriverCreation creation(
 		    {Name(0, mesh ? "ms" : "vs"), Name(1, "hs"), Name(2, "ds"), Name(3, "ps")},
 		    {Hash(0), Hash(1), Hash(2), Hash(3)});
-		return m_graphics.device.createGraphicsPipelines(cache, 1, &pipeline_info, nullptr, &out);
+		const auto create = [&](vk::PipelineCreateFlags create_flags) {
+			pipeline_info.flags = create_flags;
+			return m_graphics.device.createGraphicsPipelines(cache, 1, &pipeline_info, nullptr, &out);
+		};
+		return CreateAuditedPipeline(m_graphics, "graphics", PipelineCache::GraphicsPipelineKeyHash {}(m_key),
+		                             flags, out, create);
 	}
 
 	vk::Pipeline CreateLibrary(vk::PipelineLayout layout, PipelineLibraryPart part) {
@@ -539,7 +585,12 @@ public:
 			const ScopedDriverCreation creation(
 			    {Name(0, "vs-lib"), Name(1, "hs-lib"), Name(2, "ds-lib"), Name(3, "ps-lib")},
 			    {Hash(0), Hash(1), Hash(2), Hash(3)});
-			result = m_graphics.device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &handle);
+			const auto build = [&](vk::PipelineCreateFlags flags) {
+				create.flags = flags;
+				return m_graphics.device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &handle);
+			};
+			result = CreateAuditedPipeline(m_graphics, "graphics_library", PipelineCache::GraphicsPipelineKeyHash {}(m_key),
+			                               create.flags, handle, build);
 		}
 		return result == vk::Result::eSuccess ? handle : vk::Pipeline {};
 	}
@@ -639,7 +690,7 @@ vk::Pipeline CreateGraphicsPipelineLibrary(GraphicContext& graphics, vk::Pipelin
 }
 
 vk::Pipeline LinkGraphicsPipeline(GraphicContext& graphics, vk::PipelineLayout layout,
-                                  std::span<const vk::Pipeline> libraries) {
+                                  const GraphicsPipelineKey& key, std::span<const vk::Pipeline> libraries) {
 	vk::PipelineLibraryCreateInfoKHR linked {};
 	linked.libraryCount = static_cast<uint32_t>(libraries.size());
 	linked.pLibraries   = libraries.data();
@@ -647,7 +698,13 @@ vk::Pipeline LinkGraphicsPipeline(GraphicContext& graphics, vk::PipelineLayout l
 	create.pNext        = &linked;
 	create.layout       = layout;
 	vk::Pipeline handle = nullptr;
-	if (graphics.device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &handle) != vk::Result::eSuccess) {
+	const auto link = [&](vk::PipelineCreateFlags flags) {
+		create.flags = flags;
+		return graphics.device.createGraphicsPipelines(nullptr, 1, &create, nullptr, &handle);
+	};
+	const auto result = CreateAuditedPipeline(graphics, "graphics_link", PipelineCache::GraphicsPipelineKeyHash {}(key),
+	                                         {}, handle, link);
+	if (result != vk::Result::eSuccess) {
 		return {};
 	}
 	return handle;
@@ -942,7 +999,15 @@ vk::Result CreateComputePipeline(GraphicContext& graphics, PipelineCache::Pipeli
 		const ScopedDriverCreation creation({"cs", nullptr, nullptr, nullptr},
 		                                    {module.info.shader_hash, 0, 0, 0});
 		const auto started = timing ? Clock::now() : Clock::time_point {};
+#if defined(ANYPS5_KYTY)
+		const auto create = [&](vk::PipelineCreateFlags flags) {
+			info.flags = flags;
+			return graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
+		};
+		result = CreateAuditedPipeline(graphics, "compute", module.id, info.flags, pipeline.pipeline, create);
+#else
 		result = graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
+#endif
 		if (timing) {
 			finished = Clock::now();
 			elapsed  = finished - started;

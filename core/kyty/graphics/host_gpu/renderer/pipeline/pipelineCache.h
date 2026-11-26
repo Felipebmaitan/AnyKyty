@@ -523,6 +523,10 @@ public:
 	                                  const ShaderRecompiler::IR::ResourceSpecialization& specialization,
 	                                  uint32_t& push_data_cursor);
 
+	struct GraphicsPipelineKeyHash {
+		std::size_t operator()(const GraphicsPipelineKey& key) const;
+	};
+
 private:
 	friend struct PipelineCacheTestAccess;
 
@@ -581,10 +585,6 @@ private:
 
 	struct ProgramKeyHash {
 		std::size_t operator()(const ProgramKey& key) const { return key.hash; }
-	};
-
-	struct GraphicsPipelineKeyHash {
-		std::size_t operator()(const GraphicsPipelineKey& key) const;
 	};
 
 	using ModuleMap = std::unordered_map<uint64_t, const ShaderModule*>;

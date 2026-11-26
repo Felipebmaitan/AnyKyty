@@ -3,7 +3,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
+#include <string_view>
 #ifdef __linux__
 #include <dlfcn.h>
 #endif
@@ -11,7 +13,6 @@
 #ifdef _WIN32
 #include "prx/libc/include/GuestArena.hpp"
 #include <atomic>
-#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -91,6 +92,12 @@ void PrepareGuestEntry_nid_no_patch() noexcept {
         } catch (...) {
             std::fprintf(stderr, "[kyty-startup] preparing pipelines failed\n");
         }
+    }
+    const char* shaderLog = std::getenv("KYTY_SHADER_VARIANT_LOG");
+    const char* driverAudit = std::getenv("KYTY_PIPELINE_COMPILE_AUDIT");
+    if (shaderLog != nullptr && std::string_view(shaderLog) == "1" &&
+        driverAudit != nullptr && std::string_view(driverAudit) == "1") {
+        std::fputs("[kyty-startup] precook_audit shader_variants=1 driver_pipeline=1\n", stderr);
     }
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     std::fprintf(stderr, "[kyty-startup] guest_entry monotonic_ns=%lld\n",

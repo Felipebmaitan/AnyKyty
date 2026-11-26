@@ -45,7 +45,7 @@ vk::Pipeline CreateGraphicsPipelineLibrary(GraphicContext& graphics, vk::Pipelin
                                            const std::array<const ShaderModule*, 4>& stages,
                                            PipelineLibraryPart                         part);
 vk::Pipeline LinkGraphicsPipeline(GraphicContext& graphics, vk::PipelineLayout layout,
-                                  std::span<const vk::Pipeline> libraries);
+                                  const GraphicsPipelineKey& key, std::span<const vk::Pipeline> libraries);
 
 void PlaceBackgroundCompileThread(bool low_priority);
 
