@@ -330,6 +330,29 @@ struct PipelineCache::ManifestState {
 		return job;
 	}
 
+#if defined(ANYPS5_KYTY)
+	static void PrioritizeRestoredCompute(std::deque<AsyncPipelineJob>& jobs) {
+		if (!ShaderRecompiler::IR::GenericComputeVariants() || !ShaderRecompiler::IR::SharesEmptyBuffers()) return;
+		std::unordered_map<const ShaderRecompiler::IR::ResourcePlan*, std::vector<AsyncPipelineJob*>> programs;
+		for (auto& job: jobs) {
+			if (job.compute && job.module->plan != nullptr) programs[job.module->plan].push_back(&job);
+		}
+		for (const auto& group: programs | std::views::values) {
+			if (group.size() < 2) continue;
+			std::vector<const ShaderModule*> order;
+			order.reserve(group.size());
+			std::ranges::transform(group, std::back_inserter(order),
+			                       [](const AsyncPipelineJob* job) { return job->module; });
+			std::ranges::stable_partition(order, [&](const ShaderModule* module) {
+				return std::ranges::none_of(group, [&](const AsyncPipelineJob* candidate) {
+					return CanCoverEmptyComputePipeline(*module, *candidate->module);
+				});
+			});
+			for (size_t i = 0; i < group.size(); i++) group[i]->module = order[i];
+		}
+	}
+#endif
+
 	void QueueModule(uint32_t index) {
 		const auto& module = warm_modules[index];
 		const auto words = [this](uint64_t hash) {
@@ -756,6 +779,9 @@ void PipelineCache::OpenManifest() {
 	} else {
 		AddManifestRecords(all);
 	}
+#if defined(ANYPS5_KYTY)
+	ManifestState::PrioritizeRestoredCompute(m_restore_jobs);
+#endif
 	state.startup_total = static_cast<uint32_t>(state.warm_modules.size() + state.warm_pipelines.size() +
 	                                            m_restore_jobs.size());
 	state.startup_done = state.found;

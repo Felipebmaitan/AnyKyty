@@ -704,6 +704,7 @@ private:
 	void StopWorkers();
 #if defined(ANYPS5_KYTY)
 	bool ComputePipelineReady(const ShaderModule& module, bool ahead = false);
+	static bool CanCoverEmptyComputePipeline(const ShaderModule& empty, const ShaderModule& populated);
 	void NoteInstalledComputeReady(uint64_t module_id, const Pipeline& pipeline);
 	size_t FindReadyComputeVariant(const Program& program, const ShaderRecompiler::IR::ResourceSnapshot& resources,
 	                               const ShaderRecompiler::IR::ResourceSpecialization& specialization,

@@ -97,6 +97,8 @@ bool EmptyBufferServes(const ResourcePlan& program, const ResourceSnapshot& snap
                        const ResourceSpecialization::Buffer& candidate);
 bool EmptyBuffersServe(const ResourcePlan& program, const ResourceSnapshot& snapshot,
                        const ResourceSpecialization& requested, const ResourceSpecialization& candidate);
+bool PopulatedBuffersCoverEmptySpecialization(const ResourcePlan& program, const ResourceSpecialization& empty,
+                                              const ResourceSpecialization& populated);
 bool SameModuleCode(const ResourcePlan& program, const ResourceSpecialization& requested,
                     const ResourceSpecialization& candidate);
 bool GenericComputeVariants();

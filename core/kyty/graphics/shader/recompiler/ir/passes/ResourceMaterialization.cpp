@@ -2441,12 +2441,10 @@ bool SpecializedBuffersValid(const ResourceSpecialization& specialization, bool 
 	});
 }
 
-bool EmptyBufferServes(const ResourcePlan& program, const ResourceSnapshot& snapshot, uint32_t index,
-                       const ResourceSpecialization::Buffer& requested,
-                       const ResourceSpecialization::Buffer& candidate) {
-	if (!SharesEmptyBuffers() || index >= snapshot.buffers.size() || snapshot.buffers[index].dword_count != 4u ||
-	    snapshot.buffers[index].dwords[2] != 0u ||
-	    !DirectBufferSlot(program, index, requested) || !DirectBufferSlot(program, index, candidate) ||
+static bool CompatibleEmptyBuffer(const ResourcePlan& program, uint32_t index,
+                                  const ResourceSpecialization::Buffer& requested,
+                                  const ResourceSpecialization::Buffer& candidate) {
+	if (!DirectBufferSlot(program, index, requested) || !DirectBufferSlot(program, index, candidate) ||
 	    requested.indirect_mapping_offset != candidate.indirect_mapping_offset ||
 	    requested.indirect_search_iterations != candidate.indirect_search_iterations) {
 		return false;
@@ -2459,6 +2457,13 @@ bool EmptyBufferServes(const ResourcePlan& program, const ResourceSnapshot& snap
 		if (!wanted || !served || *wanted != *served) return false;
 	}
 	return true;
+}
+
+bool EmptyBufferServes(const ResourcePlan& program, const ResourceSnapshot& snapshot, uint32_t index,
+                       const ResourceSpecialization::Buffer& requested,
+                       const ResourceSpecialization::Buffer& candidate) {
+	return SharesEmptyBuffers() && index < snapshot.buffers.size() && snapshot.buffers[index].dword_count == 4u &&
+	       snapshot.buffers[index].dwords[2] == 0u && CompatibleEmptyBuffer(program, index, requested, candidate);
 }
 
 bool SameModuleCode(const ResourcePlan& program, const ResourceSpecialization& requested,
@@ -2494,6 +2499,30 @@ bool EmptyBuffersServe(const ResourcePlan& program, const ResourceSnapshot& snap
 		served = true;
 	}
 	return served;
+}
+
+bool PopulatedBuffersCoverEmptySpecialization(const ResourcePlan& program, const ResourceSpecialization& empty,
+                                              const ResourceSpecialization& populated) {
+	if (!SharesEmptyBuffers() || program.stage != ShaderType::Compute ||
+	    empty.buffers.size() != populated.buffers.size() || empty.images != populated.images ||
+	    empty.samplers != populated.samplers) {
+		return false;
+	}
+	bool covered = false;
+	for (uint32_t i = 0; i < empty.buffers.size(); i++) {
+		const auto& wanted = empty.buffers[i];
+		const auto& candidate = populated.buffers[i];
+		if (wanted == candidate) continue;
+		if (!wanted.scalar_empty || !wanted.zero_stride_oob || wanted.packed_stride != 0u ||
+		    candidate.scalar_empty || candidate.zero_stride_oob ||
+		    i >= program.info.buffers.size() || program.info.buffers[i].scalar ||
+		    i >= program.buffer_vector_access.size() || !program.buffer_vector_access[i] ||
+		    !CompatibleEmptyBuffer(program, i, wanted, candidate)) {
+			return false;
+		}
+		covered = true;
+	}
+	return covered;
 }
 #endif
 

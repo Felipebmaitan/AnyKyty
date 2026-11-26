@@ -1347,6 +1347,22 @@ bool PipelineCache::ComputePipelineReady(const ShaderModule& module, bool ahead)
 	return (ahead && m_installed_compute_ready.contains(module.id)) || ready(m_async_ready_compute);
 }
 
+bool PipelineCache::CanCoverEmptyComputePipeline(const ShaderModule& empty, const ShaderModule& populated) {
+	if (empty.plan == nullptr || empty.plan != populated.plan || !populated.module ||
+	    empty.shared_variant || populated.shared_variant || empty.linked_prepared || populated.linked_prepared ||
+	    !empty.function_code.empty() || !populated.function_code.empty() ||
+	    empty.guest_traversal != populated.guest_traversal || empty.bvh != populated.bvh ||
+	    empty.rt_mode != populated.rt_mode) {
+		return false;
+	}
+	const auto& wanted = empty.info.bindings;
+	const auto& candidate = populated.info.bindings;
+	return wanted.push_data_start_dword == candidate.push_data_start_dword &&
+	       wanted.ShaderDataDwords() == candidate.ShaderDataDwords() &&
+	       ShaderRecompiler::IR::PopulatedBuffersCoverEmptySpecialization(*empty.plan, empty.specialization,
+	                                                                     populated.specialization);
+}
+
 void PipelineCache::NoteInstalledComputeReady(uint64_t module_id, const Pipeline& pipeline) {
 	if (!pipeline.pipeline || !pipeline.pipeline_layout) return;
 	std::lock_guard lock(m_async_mutex);
@@ -1636,13 +1652,19 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			const bool generic = specialized && !m_queue_only && ShaderRecompiler::IR::GenericComputeVariants();
 			if (generic && module != nullptr && !ComputePipelineReady(*module)) {
 				if (auto* served = ServeComputeVariant(cached, runtime, push_data_cursor, module)) {
-					if (SpecializesComputeInBackground()) CreateComputePipelineAhead(*module);
+					if (SpecializesComputeInBackground() && !CanCoverEmptyComputePipeline(*module, *served)) {
+						CreateComputePipelineAhead(*module);
+					}
 					return bind(*served);
 				}
 			} else if (generic && module == nullptr) {
 				if (auto* served = ServeComputeVariant(cached, runtime, push_data_cursor, nullptr)) {
-					SpecializeComputeVariant(entry->first, cached, params, input_info, cached.specialization,
-					                         push_data_cursor);
+					if (served->linked_prepared ||
+					    !ShaderRecompiler::IR::PopulatedBuffersCoverEmptySpecialization(
+					        cached.resource_plan, cached.specialization, served->specialization)) {
+						SpecializeComputeVariant(entry->first, cached, params, input_info, cached.specialization,
+						                         push_data_cursor);
+					}
 					return bind(*served);
 				}
 			}
@@ -2696,12 +2718,23 @@ const ShaderModule* PipelineCache::GetAhead(const ShaderParams& params, InputInf
 	}
 	if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 		const auto* exact = module != modules.end() ? &*module : nullptr;
-		if (!SpecializesComputeInBackground() && ShaderRecompiler::IR::GenericComputeVariants() &&
-		    (exact == nullptr || !ComputePipelineReady(*exact, true)) &&
-		    (FindReadyComputeVariant(*program, resources, specialization, push_data_cursor, exact, true) != SIZE_MAX ||
-		     FindReadyComputeVariant(*program, resources, specialization, push_data_cursor, exact, true, true) != SIZE_MAX)) {
-			ahead.reads.Fail(AheadRefusal::Variant);
-			return nullptr;
+		const bool specializes = SpecializesComputeInBackground();
+		if (ShaderRecompiler::IR::GenericComputeVariants() &&
+		    (!specializes || std::ranges::any_of(specialization.buffers,
+		                                        &ShaderRecompiler::IR::ResourceSpecialization::Buffer::scalar_empty)) &&
+		    (exact == nullptr || !ComputePipelineReady(*exact, true))) {
+			const auto ready = FindReadyComputeVariant(*program, resources, specialization, push_data_cursor, exact, true);
+			const auto covered = ready != SIZE_MAX &&
+			                     !modules[ready].linked_prepared &&
+			                     ShaderRecompiler::IR::PopulatedBuffersCoverEmptySpecialization(
+			                         program->resource_plan, specialization, modules[ready].specialization);
+			if (covered ||
+			    (!specializes && (ready != SIZE_MAX ||
+			                     FindReadyComputeVariant(*program, resources, specialization, push_data_cursor, exact, true,
+			                                             true) != SIZE_MAX))) {
+				ahead.reads.Fail(AheadRefusal::Variant);
+				return nullptr;
+			}
 		}
 	}
 #endif
