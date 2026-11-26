@@ -28,6 +28,7 @@ struct GraphicContext {
 	vk::PhysicalDeviceMemoryProperties physical_device_memory_properties     = {};
 	vk::Device                         device                                = nullptr;
 	VmaAllocator                       allocator                             = nullptr;
+	VmaAllocator                       spill_allocator                       = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               host_import_enabled                   = false;
 	uint64_t                           host_import_alignment                 = 0;
@@ -175,6 +176,7 @@ struct VulkanImage {
 	std::vector<VulkanImageState> subresource_states;
 	VmaAllocation                allocation = nullptr;
 	bool recyclable = false;
+	bool spilled    = false;
 };
 
 

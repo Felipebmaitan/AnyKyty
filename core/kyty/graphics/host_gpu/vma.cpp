@@ -20,6 +20,9 @@
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <algorithm>
+#include <string_view>
+#include <charconv>
+#include <atomic>
 #include <array>
 #include <cinttypes>
 #include <condition_variable>
@@ -152,10 +155,12 @@ static uint64_t MemoryBudgetCap() {
 		if (value == nullptr || value[0] == '\0') {
 			return UINT64_MAX;
 		}
-		char*      end = nullptr;
-		const auto mib = std::strtoull(value, &end, 10);
-		if (end == value || *end != '\0' || mib == 0) {
-			std::fprintf(stderr, "KYTY_MEMORY_BUDGET_MB: '%s' is not a positive number of MiB; ignored\n", value);
+		const std::string_view text(value);
+		uint64_t               mib = 0;
+		const auto [end, error]    = std::from_chars(text.data(), text.data() + text.size(), mib, 10);
+		if (error != std::errc() || end != text.data() + text.size() || mib == 0 || mib > (UINT64_MAX >> 20u)) {
+			std::fprintf(stderr, "KYTY_MEMORY_BUDGET_MB: '%s' is not a positive number of MiB; the automatic limit applies\n",
+			             value);
 			return UINT64_MAX;
 		}
 		return mib << 20u;
@@ -186,9 +191,9 @@ static std::array<VkDeviceSize, VK_MAX_MEMORY_HEAPS> HeapSizeLimits(const Graphi
 		const uint64_t available = graphics.memory_budget_ext_enabled && budgets.heapBudget[heap] != 0
 		                               ? std::min<uint64_t>(budgets.heapBudget[heap], size)
 		                               : size;
-		const uint64_t forced = MemoryBudgetCap();
-		const uint64_t limit  = forced != UINT64_MAX ? std::min(forced, size)
-		                                             : std::max(available - std::min(available, DesktopReserve), size / 4);
+		const uint64_t forced  = MemoryBudgetCap();
+		const uint64_t reserve = std::min(DesktopReserve, available / 4);
+		const uint64_t limit   = forced != UINT64_MAX ? std::min(forced, size) : available - reserve;
 		limits[heap] = limit;
 		LOGF("Vulkan memory: device-local heap %u of %" PRIu64 " MiB limited to %" PRIu64 " MiB (%s)\n", heap,
 		     size >> 20u, limit >> 20u, forced != UINT64_MAX ? "KYTY_MEMORY_BUDGET_MB" : "budget less 1.5 GiB");
@@ -224,6 +229,15 @@ bool GraphicContext::CreateAllocator() {
 		LOGF("vmaCreateAllocator failed: %s\n", vk::to_string(result).c_str());
 		return false;
 	}
+	if (std::any_of(heap_limits.begin(), heap_limits.end(), [](VkDeviceSize limit) { return limit != VK_WHOLE_SIZE; })) {
+		info.pHeapSizeLimit = nullptr;
+		const auto spill    = static_cast<vk::Result>(vmaCreateAllocator(&info, &spill_allocator));
+		if (spill != vk::Result::eSuccess) {
+			LOGF("Vulkan memory: no spill allocator (%s): an allocation past the heap limits fails\n",
+			     vk::to_string(spill).c_str());
+			spill_allocator = nullptr;
+		}
+	}
 	return true;
 }
 
@@ -234,6 +248,10 @@ void GraphicContext::DestroyAllocator() {
 	DestroyRecycledImages(allocator);
 	vmaDestroyAllocator(allocator);
 	allocator = nullptr;
+	if (spill_allocator != nullptr) {
+		vmaDestroyAllocator(spill_allocator);
+		spill_allocator = nullptr;
+	}
 }
 
 void GraphicContext::LogMemoryBudget() const {
@@ -355,6 +373,21 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 			    allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
 			    &alloc_info, &native_image, &image.allocation, nullptr));
 		}
+		if (result != vk::Result::eSuccess && spill_allocator != nullptr) {
+			VmaAllocationCreateInfo spill_info {};
+			spill_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+			result           = static_cast<vk::Result>(vmaCreateImage(
+                spill_allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &spill_info,
+                &native_image, &image.allocation, nullptr));
+			if (result == vk::Result::eSuccess) {
+				image.spilled = true;
+				static std::atomic<uint32_t> reported {0};
+				if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+					LOGF("Vulkan memory: an image of %ux%u past the heap limit is placed by the spill allocator\n",
+					     image_info.extent.width, image_info.extent.height);
+				}
+			}
+		}
 		if (result != vk::Result::eSuccess) {
 			image.image = native_image;
 			LogMemoryBudget();
@@ -370,7 +403,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	image.mip_levels = image_info.mipLevels;
 	image.samples    = static_cast<uint32_t>(image_info.samples);
 	image.usage      = image_info.usage;
-	image.recyclable = Recyclable(image_info);
+	image.recyclable = Recyclable(image_info) && !image.spilled;
 	image.flags      = image_info.flags;
 	image.state      = {.layout = image_info.initialLayout};
 	image.subresource_states.clear();
@@ -407,10 +440,11 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 			g_recycled.erase(g_recycled.begin());
 		}
 	} else {
-		Graveyard().Push(allocator, image.image, image.allocation);
+		Graveyard().Push(image.spilled ? spill_allocator : allocator, image.image, image.allocation);
 	}
 	image.image      = nullptr;
 	image.allocation = nullptr;
+	image.spilled    = false;
 }
 
 }
