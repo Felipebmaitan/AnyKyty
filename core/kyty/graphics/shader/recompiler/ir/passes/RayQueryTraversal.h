@@ -34,6 +34,7 @@ struct NativeTraversals {
 	uint32_t                                   root          = 0;
 	std::array<uint32_t, 4>                    layout {};
 	std::vector<std::pair<uint32_t, uint32_t>> reach;
+	std::vector<RayQueryExtraSource>           extra_sources;
 	std::vector<NativeTraversals>              oracle_sources;
 	std::vector<OracleImprovement>             oracle_improvements;
 };

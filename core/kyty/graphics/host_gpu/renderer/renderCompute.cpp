@@ -100,12 +100,22 @@ static bool PrepareNativeRayTracing(RenderContext& context, const CommandRecorde
 	const auto& module = *bindings.runtime->module;
 	const auto& info   = module.info.info;
 	if (RayTracing::TlasSource source; RayTracing::FindTlasSource(info, source)) {
-		const auto& user    = cs_regs.cs_user_sgpr.value;
-		const auto  pointer = RayTracing::UserPointer(
-		    source, uint64_t {user[source.user_sgpr]} | (uint64_t {user[source.user_sgpr + 1]} << 32u),
-		    [&](uint64_t address, uint64_t size) { return context.IsMapped(address, size); });
-		native_rt.Prepare(command, pointer, source, bindings.flattened_srt, context.GetGpu().GetFrameNum(),
-		                  module.info.shader_hash, count_rays);
+		const auto& user     = cs_regs.cs_user_sgpr.value;
+		const auto  prepare  = [&](const RayTracing::TlasSource& each, uint32_t index) {
+			if (each.user_sgpr + 1 >= HW::UserSgprInfo::SGPRS_MAX) {
+				native_rt.InvalidateContext(command, index);
+				return;
+			}
+			const auto pointer = RayTracing::UserPointer(
+			    each, uint64_t {user[each.user_sgpr]} | (uint64_t {user[each.user_sgpr + 1]} << 32u),
+			    [&](uint64_t address, uint64_t size) { return context.IsMapped(address, size); });
+			native_rt.Prepare(command, pointer, each, bindings.flattened_srt, context.GetGpu().GetFrameNum(),
+			                  module.info.shader_hash, count_rays, false, index);
+		};
+		prepare(source, 0);
+		for (uint32_t index = 0; index < info.ray_query_extra_sources.size(); index++) {
+			prepare(RayTracing::ExtraTlasSource(info.ray_query_extra_sources[index]), index + 1);
+		}
 		return true;
 	}
 	if (info.bvh && note_guest) {

@@ -7,7 +7,8 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
-constexpr uint32_t MaxRayQuerySites = 4;
+constexpr uint32_t MaxRayQuerySites = 32;
+constexpr uint32_t MaxRayQuerySources = 32;
 constexpr uint32_t BvhIntersectNative = 1u << 8;
 constexpr uint32_t BvhIntersectOracle = 1u << 9;
 constexpr uint32_t BvhIntersectOracleLane = 1u << 10;
