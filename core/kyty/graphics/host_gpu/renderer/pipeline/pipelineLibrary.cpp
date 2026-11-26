@@ -81,7 +81,18 @@ std::string PartKey(PipelineLibraryPart part, const GraphicsPipelineKey& key,
 			break;
 		case PipelineLibraryPart::FragmentOutput:
 			Append(result, key.rendering);
-			Append(result, params);
+			Append(result, params.samples);
+			Append(result, params.sample_shading_enable);
+			Append(result, params.alpha_to_coverage_enable);
+			Append(result, params.color_mask);
+			Append(result, params.blend_enable);
+			Append(result, params.color_srcblend);
+			Append(result, params.color_destblend);
+			Append(result, params.color_comb_fcn);
+			Append(result, params.separate_alpha_blend);
+			Append(result, params.alpha_srcblend);
+			Append(result, params.alpha_destblend);
+			Append(result, params.alpha_comb_fcn);
 			break;
 	}
 	return result;
