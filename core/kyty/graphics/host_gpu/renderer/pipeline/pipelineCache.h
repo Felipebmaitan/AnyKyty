@@ -435,6 +435,8 @@ public:
 	static bool HasStartupPipelineData();
 	bool WaitForStartupManifest(std::chrono::milliseconds timeout, uint32_t& done, uint32_t& total,
 	                            bool& memory_paused);
+	void FlushManifestRecording();
+	[[nodiscard]] bool WaitForManifestCompletion(std::chrono::milliseconds timeout) const;
 
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;

@@ -4570,6 +4570,11 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 #endif
 				lock.unlock();
 				auto& ready = m_compute_pipelines.insert(std::move(node)).position->second;
+#if defined(ANYPS5_KYTY)
+				if (ShaderVariantLog()) {
+					PipelineCacheLog("[kyty-variant] ready-pipeline stage=CS module={:016x}", module.id);
+				}
+#endif
 				NoteUse(ready, stages);
 				return ready;
 			}

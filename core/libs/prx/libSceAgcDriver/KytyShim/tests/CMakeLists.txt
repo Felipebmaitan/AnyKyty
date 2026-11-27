@@ -70,6 +70,16 @@ target_include_directories(kyty_shim_half_profile_tests SYSTEM PRIVATE ${CMAKE_S
 add_test(NAME kyty_shim_half_profile COMMAND kyty_shim_half_profile_tests)
 set_tests_properties(kyty_shim_half_profile PROPERTIES TIMEOUT 20)
 
+add_test_executable(kyty_shim_image_heap_variant_key_tests ${CMAKE_CURRENT_SOURCE_DIR}/ImageHeapVariantKey.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
+target_include_directories(kyty_shim_image_heap_variant_key_tests PRIVATE ${LIBS_INCLUDE_DIR})
+configure_host_test_executable(kyty_shim_image_heap_variant_key_tests)
+if(MINGW)
+    target_link_libraries(kyty_shim_image_heap_variant_key_tests PRIVATE stdc++ gcc_eh)
+endif()
+target_link_libraries(kyty_shim_image_heap_variant_key_tests PRIVATE Kyty::gpu libkernel libc)
+add_test(NAME kyty_shim_image_heap_variant_key COMMAND kyty_shim_image_heap_variant_key_tests)
+set_tests_properties(kyty_shim_image_heap_variant_key PROPERTIES TIMEOUT 20)
+
 add_test_executable(kyty_shim_replay_sampling_tests ${CMAKE_CURRENT_SOURCE_DIR}/ReplaySampling.cpp)
 configure_host_test_executable(kyty_shim_replay_sampling_tests)
 target_include_directories(kyty_shim_replay_sampling_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../tools)
@@ -267,6 +277,14 @@ if(NOT ANYPS5_KYTY_DLL AND (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
     set_tests_properties(kyty_shim_buffer_cache_pages PROPERTIES TIMEOUT 25 SKIP_RETURN_CODE 77
             ENVIRONMENT "KYTY_GPU_PIPELINE=0"
             PASS_REGULAR_EXPRESSION "kyty_shim_buffer_cache_pages: ok" FAIL_REGULAR_EXPRESSION "FAILED")
+    target_sources(libSceAgcDriver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/VramBudget.cpp)
+    add_test_executable(kyty_shim_vram_budget_tests ${CMAKE_CURRENT_SOURCE_DIR}/VramBudgetMain.cpp)
+    configure_host_test_executable(kyty_shim_vram_budget_tests)
+    target_link_libraries(kyty_shim_vram_budget_tests PRIVATE libSceAgcDriver libkernel libc)
+    add_test(NAME kyty_shim_vram_budget COMMAND kyty_shim_vram_budget_tests)
+    add_test(NAME kyty_shim_vram_budget_guest_eviction COMMAND kyty_shim_vram_budget_tests guest-eviction)
+    set_tests_properties(kyty_shim_vram_budget kyty_shim_vram_budget_guest_eviction
+            PROPERTIES TIMEOUT 25 SKIP_RETURN_CODE 77 ENVIRONMENT "KYTY_GPU_PIPELINE=0")
     if(NOT ANYPS5_ENABLE_ASAN)
         target_sources(libSceAgcDriver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/IndirectDispatchDimensions.cpp)
         add_test_executable(kyty_shim_indirect_dispatch_dimensions_tests ${CMAKE_CURRENT_SOURCE_DIR}/IndirectDispatchDimensionsMain.cpp)
@@ -449,6 +467,21 @@ set_tests_properties(kyty_shim_tiled_layout_stop PROPERTIES TIMEOUT 20
         PASS_REGULAR_EXPRESSION "TileGetTiledTextureLayout.*: format 76, tile mode 24, 2D 1009x1x1, 2 levels"
         FAIL_REGULAR_EXPRESSION "did not stop")
 
+add_test_executable(kyty_shim_tiler_shaders_tests ${CMAKE_CURRENT_SOURCE_DIR}/TilerShaders.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
+target_include_directories(kyty_shim_tiler_shaders_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_include_directories(kyty_shim_tiler_shaders_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Tools/include)
+configure_host_test_executable(kyty_shim_tiler_shaders_tests)
+if(MINGW)
+    target_link_libraries(kyty_shim_tiler_shaders_tests PRIVATE stdc++ gcc_eh)
+endif()
+target_link_libraries(kyty_shim_tiler_shaders_tests PRIVATE Kyty::gpu libkernel libc)
+add_test(NAME kyty_shim_tiler_shaders COMMAND kyty_shim_tiler_shaders_tests)
+set_tests_properties(kyty_shim_tiler_shaders PROPERTIES TIMEOUT 20
+        PASS_REGULAR_EXPRESSION "kyty_shim_tiler_shaders: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+add_test(NAME kyty_shim_tiler_shaders_gpu COMMAND kyty_shim_tiler_shaders_tests gpu)
+set_tests_properties(kyty_shim_tiler_shaders_gpu PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77
+        PASS_REGULAR_EXPRESSION "kyty_shim_tiler_shaders_gpu: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+
 add_test_executable(kyty_shim_merged_hull_tests ${CMAKE_CURRENT_SOURCE_DIR}/MergedHull.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
 target_include_directories(kyty_shim_merged_hull_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_include_directories(kyty_shim_merged_hull_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Tools/include)
@@ -462,6 +495,21 @@ set_tests_properties(kyty_shim_merged_hull PROPERTIES TIMEOUT 20 PASS_REGULAR_EX
         FAIL_REGULAR_EXPRESSION "terminate called")
 add_test(NAME kyty_shim_merged_hull_draw COMMAND kyty_shim_merged_hull_tests draw)
 set_tests_properties(kyty_shim_merged_hull_draw PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77)
+
+add_test_executable(kyty_shim_mesh_per_primitive_block_tests ${CMAKE_CURRENT_SOURCE_DIR}/MeshPerPrimitiveBlock.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
+target_include_directories(kyty_shim_mesh_per_primitive_block_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_include_directories(kyty_shim_mesh_per_primitive_block_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Tools/include)
+configure_host_test_executable(kyty_shim_mesh_per_primitive_block_tests)
+if(MINGW)
+    target_link_libraries(kyty_shim_mesh_per_primitive_block_tests PRIVATE stdc++ gcc_eh)
+endif()
+target_link_libraries(kyty_shim_mesh_per_primitive_block_tests PRIVATE Kyty::gpu libkernel libc)
+add_test(NAME kyty_shim_mesh_per_primitive_block COMMAND kyty_shim_mesh_per_primitive_block_tests)
+set_tests_properties(kyty_shim_mesh_per_primitive_block PROPERTIES TIMEOUT 20
+        PASS_REGULAR_EXPRESSION "kyty_shim_mesh_per_primitive_block: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+add_test(NAME kyty_shim_mesh_per_primitive_block_draw COMMAND kyty_shim_mesh_per_primitive_block_tests draw)
+set_tests_properties(kyty_shim_mesh_per_primitive_block_draw PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77
+        PASS_REGULAR_EXPRESSION "kyty_shim_mesh_per_primitive_block_draw: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
 
 if(NOT ANYPS5_KYTY_DLL)
     add_test_executable(kyty_shim_recompiler_robustness_tests ${CMAKE_CURRENT_SOURCE_DIR}/RecompilerRobustness.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
@@ -487,6 +535,15 @@ if(NOT ANYPS5_KYTY_DLL)
     add_test(NAME kyty_shim_recompiler_stale_lane_spill COMMAND kyty_shim_recompiler_robustness_tests stale-lane-spill-after-read-lane-elimination)
     set_tests_properties(kyty_shim_recompiler_stale_lane_spill PROPERTIES TIMEOUT 60 PASS_REGULAR_EXPRESSION "kyty_shim_recompiler_robustness: ok"
             FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+    add_test(NAME kyty_shim_recompiler_sampler_spill_phi COMMAND kyty_shim_recompiler_robustness_tests sampler-spill-phi)
+    set_tests_properties(kyty_shim_recompiler_sampler_spill_phi PROPERTIES TIMEOUT 20
+            PASS_REGULAR_EXPRESSION "sampler-spill-phi: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+    add_test(NAME kyty_shim_recompiler_phi_reachability COMMAND kyty_shim_recompiler_robustness_tests phi-reachability)
+    set_tests_properties(kyty_shim_recompiler_phi_reachability PROPERTIES TIMEOUT 20
+            PASS_REGULAR_EXPRESSION "phi-reachability: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+    add_test(NAME kyty_shim_recompiler_mad_not_fused COMMAND kyty_shim_recompiler_robustness_tests mad-not-fused)
+    set_tests_properties(kyty_shim_recompiler_mad_not_fused PROPERTIES TIMEOUT 60
+            FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
 endif()
 
 add_test_executable(kyty_shim_compute_execution_tests ${CMAKE_CURRENT_SOURCE_DIR}/ComputeExecution.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
@@ -500,6 +557,9 @@ target_link_libraries(kyty_shim_compute_execution_tests PRIVATE Kyty::gpu libker
 add_test(NAME kyty_shim_compute_execution COMMAND kyty_shim_compute_execution_tests)
 set_tests_properties(kyty_shim_compute_execution PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77
         PASS_REGULAR_EXPRESSION "kyty_shim_compute_execution: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
+add_test(NAME kyty_shim_compute_sampler_spill COMMAND kyty_shim_compute_execution_tests sampler-spill)
+set_tests_properties(kyty_shim_compute_sampler_spill PROPERTIES TIMEOUT 20 SKIP_RETURN_CODE 77
+        PASS_REGULAR_EXPRESSION "sampler spill: 32/32 lanes sampled 1.0" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
 
 add_test_executable(kyty_shim_pair_codegen_tests ${CMAKE_CURRENT_SOURCE_DIR}/PairCodegen.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
 target_include_directories(kyty_shim_pair_codegen_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -648,6 +708,21 @@ if(WIN32)
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
 endif()
 
+add_test_executable(kyty_shim_depth_meta_fill_tests ${CMAKE_CURRENT_SOURCE_DIR}/DepthMetaFillReplay.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../Execution/src/FrameCapture.cpp)
+target_include_directories(kyty_shim_depth_meta_fill_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/zstd/lib)
+target_link_libraries(kyty_shim_depth_meta_fill_tests PRIVATE libzstd_static)
+set_target_properties(kyty_shim_depth_meta_fill_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_host_test_executable(kyty_shim_depth_meta_fill_tests)
+add_dependencies(kyty_shim_depth_meta_fill_tests agc_frame_replay)
+add_test(NAME kyty_shim_depth_meta_fill COMMAND kyty_shim_depth_meta_fill_tests $<TARGET_FILE:agc_frame_replay>)
+set_tests_properties(kyty_shim_depth_meta_fill PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+        PASS_REGULAR_EXPRESSION "kyty_shim_depth_meta_fill: ok")
+if(WIN32)
+    set_property(TEST kyty_shim_depth_meta_fill APPEND PROPERTY
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+endif()
+
 add_test_executable(kyty_shim_buffer_null_range_tests ${CMAKE_CURRENT_SOURCE_DIR}/BufferNullRange.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../../Execution/src/FrameCapture.cpp)
 target_include_directories(kyty_shim_buffer_null_range_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/zstd/lib)
@@ -771,6 +846,12 @@ set_tests_properties(kyty_shim_generic_compute_replay PROPERTIES TIMEOUT 180 SKI
 add_test(NAME kyty_shim_generic_compute_replay_wide COMMAND kyty_shim_generic_compute_replay_tests $<TARGET_FILE:agc_frame_replay>)
 set_tests_properties(kyty_shim_generic_compute_replay_wide PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77
         ENVIRONMENT "KYTY_GENERIC_COMPUTE_SPECIALIZE=0" PASS_REGULAR_EXPRESSION "kyty_shim_generic_compute_replay_wide: ok")
+if(NOT ANYPS5_ENABLE_ASAN AND NOT ANYPS5_ENABLE_TSAN)
+    add_test(NAME kyty_shim_prepared_variant_first_use COMMAND kyty_shim_generic_compute_replay_tests
+            $<TARGET_FILE:agc_frame_replay> --prepared)
+    set_tests_properties(kyty_shim_prepared_variant_first_use PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77
+            PASS_REGULAR_EXPRESSION "kyty_shim_prepared_variant_first_use: ok")
+endif()
 add_test_executable(kyty_shim_packed_unorm_blend_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/PackedUnormBlend.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp
@@ -843,12 +924,17 @@ set_tests_properties(kyty_shim_cross_queue_recycled_label_own_tick PROPERTIES TI
 if(WIN32)
     set_property(TEST kyty_shim_buffer_null_range kyty_shim_uniform_scalar_replay kyty_shim_empty_buffer_replay
             kyty_shim_empty_buffer_replay_off kyty_shim_bda_load_forms
-            kyty_shim_generic_compute_replay kyty_shim_generic_compute_replay_wide kyty_shim_bda_submission_sync
+            kyty_shim_generic_compute_replay kyty_shim_generic_compute_replay_wide
+            kyty_shim_bda_submission_sync
             kyty_shim_cross_queue_compute_waits_graphics_data kyty_shim_cross_queue_graphics_waits_compute_data
             kyty_shim_cross_queue_dma_wait kyty_shim_cross_queue_compute_waits_graphics_clock
             kyty_shim_cross_queue_graphics_waits_compute_clock kyty_shim_cross_queue_recycled_label
             kyty_shim_cross_queue_early_label kyty_shim_cross_queue_recycled_label_own_tick
             APPEND PROPERTY ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    if(NOT ANYPS5_ENABLE_ASAN AND NOT ANYPS5_ENABLE_TSAN)
+        set_property(TEST kyty_shim_prepared_variant_first_use APPEND PROPERTY ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAgcDriver>")
+    endif()
 endif()
 endif()
 

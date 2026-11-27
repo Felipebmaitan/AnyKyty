@@ -392,15 +392,19 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	if (!m_graphics.CanReportMemoryUsage()) {
 		return;
 	}
+	UpdateMemoryThresholds(m_graphics.GetTotalMemoryBudget());
+}
+
+void BufferCache::UpdateMemoryThresholds(uint64_t budget_bytes) {
+	m_memory_budget = budget_bytes;
 	constexpr int64_t GiB              = 1024ll * 1024 * 1024;
 	constexpr int64_t target_threshold = 8 * GiB;
-	const auto        budget =
-	    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
-	const auto threshold = std::min(budget, target_threshold);
-	const auto expected  = std::min(budget - 6 * threshold / 10, budget - GiB);
-	const auto critical  = std::min(budget - 2 * threshold / 10, budget - GiB / 2);
-	m_trigger_gc_memory  = static_cast<uint64_t>(std::max<int64_t>(expected, GiB));
-	m_critical_gc_memory = static_cast<uint64_t>(std::max<int64_t>(critical, 2 * GiB));
+	const auto        budget           = static_cast<int64_t>(std::min<uint64_t>(budget_bytes, INT64_MAX));
+	const auto        threshold        = std::min(budget, target_threshold);
+	const auto        expected         = std::min(budget - 6 * threshold / 10, budget - GiB);
+	const auto        critical         = std::min(budget - 2 * threshold / 10, budget - GiB / 2);
+	m_trigger_gc_memory                = static_cast<uint64_t>(std::max<int64_t>(expected, GiB));
+	m_critical_gc_memory               = static_cast<uint64_t>(std::max<int64_t>(critical, 2 * GiB));
 }
 
 BufferCache::~BufferCache() {
@@ -2059,7 +2063,7 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	if (vaddr == 0) {
 		EXIT("BufferCache: invalid fill memory address\n");
 	}
-	(void)m_texture_cache.ClearMeta(vaddr);
+	const bool meta = m_texture_cache.ClearMeta(vaddr);
 	if (!IsRegionGpuModified(vaddr, size) && !ServesInPlace(vaddr, size) && !DeferredLabelPending(vaddr, size)) {
 		InvalidateMemory(vaddr, size);
 		m_texture_cache.InvalidateMemory(vaddr, size);
@@ -2067,6 +2071,9 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
 		std::fill(destination, destination + size / sizeof(uint32_t), value);
 		LibKernel::Memory::NoteEmulatorWrite(vaddr, size);
+		if (!meta) {
+			m_texture_cache.NoteMetaFill(vaddr, size, value, true);
+		}
 		return;
 	}
 
@@ -2076,6 +2083,9 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	m_in_place_write       = InPlaceMemory::WriteKind::Binding;
 	m_texture_cache.ProtectPendingImageWriteBacks(vaddr, size);
 	dst->Fill(dst_offset, size, value);
+	if (!meta) {
+		m_texture_cache.NoteMetaFill(vaddr, size, value, false);
+	}
 }
 
 bool BufferCache::ReplicateBuffer(uint64_t destination, uint64_t count, uint64_t source,
@@ -3311,6 +3321,10 @@ void BufferCache::RunGarbageCollector() {
 	const auto tick = m_gc_tick++;
 	CollectStaleBuffers(tick);
 	if (m_graphics.CanReportMemoryUsage()) {
+		const auto budget = m_graphics.GetTotalMemoryBudget();
+		if (budget != m_memory_budget) {
+			UpdateMemoryThresholds(budget);
+		}
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}
 	if (m_total_used_memory < m_trigger_gc_memory) {

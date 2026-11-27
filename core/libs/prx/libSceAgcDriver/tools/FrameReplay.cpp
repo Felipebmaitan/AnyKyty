@@ -13,6 +13,7 @@
 #include "SceTypes.hpp"
 #include "FrameReplaySampling.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libkernel/include/Api.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -93,6 +94,7 @@ struct Options {
     std::size_t submits = 0;
     bool traceSerials = false;
     bool coldPipelines = false;
+    bool waitManifest = false;
 };
 
 struct ThreadSample {
@@ -396,6 +398,57 @@ void restoreSnapshot(const FrameCaptureReader& reader, const Skipped& skipped) {
     }
 }
 
+const FrameMemoryChunk& aliasedRange(const FrameCaptureReader& reader, const FrameMemoryChunk& alias) {
+    for (const auto& chunk : reader.Chunks()) {
+        if (chunk.kind == FrameMemoryKind::Range && (chunk.rangeKind == FrameRangeKind::Watched || chunk.rangeKind == FrameRangeKind::Unwatched) &&
+            chunk.address == alias.group && chunk.bytes == alias.bytes) {
+            return chunk;
+        }
+    }
+    throw std::runtime_error("frame replay: the alias range at " + std::to_string(alias.address) + " maps no guest memory range of " +
+                             std::to_string(alias.bytes) + " bytes at " + std::to_string(alias.group));
+}
+
+std::set<std::pair<std::uint64_t, std::uint64_t>> aliasTargets(const FrameCaptureReader& reader) {
+    std::set<std::pair<std::uint64_t, std::uint64_t>> targets;
+    for (const auto& chunk : reader.Chunks()) {
+        if (chunk.kind == FrameMemoryKind::Range && chunk.rangeKind == FrameRangeKind::Alias) targets.emplace(chunk.group, chunk.bytes);
+    }
+    return targets;
+}
+
+int directProtection(const FrameMemoryChunk& chunk) {
+    constexpr int CpuReadWrite = 0x03;
+    constexpr int GpuReadWrite = 0x30;
+    return (chunk.access & FrameRangeAccess::Gpu) != 0 ? CpuReadWrite | GpuReadWrite : CpuReadWrite;
+}
+
+void mapSharedRanges(const FrameCaptureReader& reader) {
+    constexpr int MapFixed = 0x10;
+    const auto map = [](const FrameMemoryChunk& chunk, std::int64_t phys) {
+        auto* const wanted = reinterpret_cast<void*>(static_cast<std::uintptr_t>(chunk.address));
+        void* placed = wanted;
+        if (sceKernelMapDirectMemory(&placed, static_cast<std::size_t>(chunk.bytes), directProtection(chunk), MapFixed, phys, 0) != 0 || placed != wanted) {
+            throw std::runtime_error("frame replay: cannot map direct memory for the shared range at " + std::to_string(chunk.address));
+        }
+    };
+    std::map<std::uint64_t, std::int64_t> backings;
+    for (const auto& chunk : reader.Chunks()) {
+        if (chunk.kind != FrameMemoryKind::Range || chunk.rangeKind != FrameRangeKind::Alias) continue;
+        const auto& range = aliasedRange(reader, chunk);
+        auto backing = backings.find(range.address);
+        if (backing == backings.end()) {
+            std::int64_t phys = -1;
+            if (sceKernelAllocateDirectMemory(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), static_cast<std::size_t>(range.bytes), 0, 0, &phys) != 0) {
+                throw std::runtime_error("frame replay: cannot allocate direct memory for the shared range at " + std::to_string(range.address));
+            }
+            map(range, phys);
+            backing = backings.emplace(range.address, phys).first;
+        }
+        map(chunk, backing->second);
+    }
+}
+
 Skipped restoreMemory(const FrameCaptureReader& reader) {
     if (reader.Version() < 2) throw std::runtime_error("frame replay: calls format 1 does not record whether GPU writes had landed before each memory delta was read; record the capture again");
     std::uintptr_t base = 0;
@@ -407,11 +460,15 @@ Skipped restoreMemory(const FrameCaptureReader& reader) {
     mapHostRanges(reader, skipped);
     std::vector<bool> owned;
     for (const auto& chunk : reader.Chunks()) owned.push_back(chunk.kind == FrameMemoryKind::Range && chunk.rangeKind != FrameRangeKind::Host && committedWritable(chunk.address, chunk.bytes));
+    const auto targets = aliasTargets(reader);
     {
         GuestAllocations::Mutation mutation;
         for (std::size_t index = 0; index < reader.Chunks().size(); ++index) {
             const auto& chunk = reader.Chunks()[index];
-            if (chunk.kind != FrameMemoryKind::Range || chunk.rangeKind == FrameRangeKind::Host) continue;
+            if (chunk.kind != FrameMemoryKind::Range || chunk.rangeKind == FrameRangeKind::Host || chunk.rangeKind == FrameRangeKind::Alias ||
+                targets.contains({chunk.address, chunk.bytes})) {
+                continue;
+            }
             const bool gpu = (chunk.access & FrameRangeAccess::Gpu) != 0;
             if (owned[index]) {
                 if (!gpu) {
@@ -434,6 +491,7 @@ Skipped restoreMemory(const FrameCaptureReader& reader) {
             mutation.Add(pointer, bytes, (chunk.access & FrameRangeAccess::Readable) != 0, (chunk.access & FrameRangeAccess::Writable) != 0, gpu);
         }
     }
+    mapSharedRanges(reader);
     restoreSnapshot(reader, skipped);
     return skipped;
 }
@@ -457,7 +515,7 @@ ResetResult resetMemory(const FrameCaptureReader& reader, const Skipped& skipped
     AgcDriverWaitIdle_nid_postfix();
     ResetResult result;
     for (const auto& chunk : reader.Chunks()) {
-        if (chunk.kind != FrameMemoryKind::Range || skipped.Overlaps(chunk)) continue;
+        if (chunk.kind != FrameMemoryKind::Range || chunk.rangeKind == FrameRangeKind::Alias || skipped.Overlaps(chunk)) continue;
         std::memset(reinterpret_cast<void*>(static_cast<std::uintptr_t>(chunk.address)), 0, static_cast<std::size_t>(chunk.bytes));
         result.rangeBytes += chunk.bytes;
     }
@@ -1034,7 +1092,7 @@ struct Replay {
 
 int usage() {
     std::fprintf(stderr, "usage: agc_frame_replay <capture directory> [--no-pace] [--pace-timeout-ms <n>] [--no-release] [--release-after-ms <n>] [--strict]\n"
-                         "                        [--repeat <n>] [--cold-pipelines] [--dump <address>:<bytes>:<file>]...\n"
+                         "                        [--repeat <n>] [--cold-pipelines] [--wait-manifest] [--dump <address>:<bytes>:<file>]...\n"
                          "  replays the driver calls and guest memory that APS5_FRAME_CAPTURE=<directory> recorded, through this\n"
                          "  build's AGC driver with no title running, and prints one JSON line with the frame times\n"
                          "  --no-pace           issues calls without waiting for the in-flight depth the title had\n"
@@ -1047,6 +1105,7 @@ int usage() {
                          "  --repeat <n>        replays the frames n times in this process, restoring the snapshot before each pass;\n"
                          "                      with n > 1 the frame times come from passes 2 to n, after the first warmed the caches\n"
                          "  --cold-pipelines    starts with an empty Vulkan pipeline cache instead of the title's pipeline cache file\n"
+                          "  --wait-manifest     waits up to 30 seconds for the saved pipeline manifest to finish preparing\n"
                          "  --shaders           replays nothing and maps no guest memory; lists each shader registration with its code\n"
                          "                      address, size and code hash as the snapshot and the captured writes before it hold them,\n"
                          "                      and how many registrations share that code\n"
@@ -1639,10 +1698,13 @@ void configureEnvironment(const Options& options) {
 #ifdef _WIN32
     _putenv_s("APS5_FRAME_CAPTURE", "");
     _putenv_s("APS5_HEADLESS_PIPELINE_CACHE", options.coldPipelines ? "" : "1");
+    _putenv_s("APS5_REPLAY_WAIT_MANIFEST", options.waitManifest ? "1" : "");
 #else
     unsetenv("APS5_FRAME_CAPTURE");
     if (options.coldPipelines) unsetenv("APS5_HEADLESS_PIPELINE_CACHE");
     else setenv("APS5_HEADLESS_PIPELINE_CACHE", "1", 1);
+    if (options.waitManifest) setenv("APS5_REPLAY_WAIT_MANIFEST", "1", 1);
+    else unsetenv("APS5_REPLAY_WAIT_MANIFEST");
 #endif
 }
 
@@ -1670,6 +1732,7 @@ int main(int argc, char** argv) {
             if (error != std::errc{} || end != value.data() + value.size() || options.submits == 0) return usage();
         } else if (argument == "--trace-serials") options.traceSerials = true;
         else if (argument == "--cold-pipelines") options.coldPipelines = true;
+        else if (argument == "--wait-manifest") options.waitManifest = true;
         else if (argument == "--dump" && index + 1 < argc) options.dumps.push_back(parseDump(argv[++index]));
         else if (argument == "--frames" && index + 1 < argc) options.frames = argv[++index];
         else if (!argument.starts_with("-") && options.directory.empty()) options.directory = argument;
