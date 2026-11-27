@@ -337,7 +337,8 @@ endif()
 
 add_test_executable(kyty_shim_presentation_upscale_tests ${CMAKE_CURRENT_SOURCE_DIR}/PresentationUpscale.cpp)
 configure_host_test_executable(kyty_shim_presentation_upscale_tests)
-target_include_directories(kyty_shim_presentation_upscale_tests PRIVATE ${CMAKE_SOURCE_DIR}/core/libs)
+target_include_directories(kyty_shim_presentation_upscale_tests PRIVATE ${CMAKE_SOURCE_DIR}/core/libs
+        ${CMAKE_SOURCE_DIR}/core/kyty ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
 add_test(NAME kyty_shim_presentation_upscale COMMAND kyty_shim_presentation_upscale_tests)
 set_tests_properties(kyty_shim_presentation_upscale PROPERTIES TIMEOUT 20)
 

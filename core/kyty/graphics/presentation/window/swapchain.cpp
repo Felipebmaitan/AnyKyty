@@ -21,6 +21,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/surfaceCopy.h"
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
@@ -48,7 +49,7 @@ struct Presenter::Frame {
 
 	void Configure(GraphicContext& graphics, vk::Extent2D extent, vk::Format format);
 	void Transit(CommandRecorder command, vk::ImageLayout layout, vk::AccessFlags2 access);
-	void CopyFrom(CommandBuffer& command, Image& source);
+	void CopyFrom(CommandBuffer& command, Image& source, const vk::ImageCopy& copy);
 	void Clear(CommandBuffer& command, const vk::ClearColorValue& color);
 };
 
@@ -211,17 +212,14 @@ void Presenter::Frame::Transit(CommandRecorder command, vk::ImageLayout layout,
 	image.state = {stage, access, layout};
 }
 
-void Presenter::Frame::CopyFrom(CommandBuffer& command_buffer, Image& source) {
+void Presenter::Frame::CopyFrom(CommandBuffer& command_buffer, Image& source, const vk::ImageCopy& copy) {
 	command_buffer.EndRendering();
 	auto command = command_buffer.Handle();
-	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
+	const ImageSubresourceRange range {copy.srcSubresource.mipLevel, 1,
+	                                   copy.srcSubresource.baseArrayLayer, 1};
+	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, range,
 	               command);
 	Transit(command, vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite);
-	vk::ImageCopy copy {};
-	copy.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
-	copy.dstSubresource = copy.srcSubresource;
-	copy.extent         = {std::min(source.backing.extent.width, image.extent.width),
-	                       std::min(source.backing.extent.height, image.extent.height), 1};
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, image.image,
 	                  vk::ImageLayout::eTransferDstOptimal, copy);
 }
@@ -349,7 +347,7 @@ struct Presenter::Impl {
 		return true;
 	}
 
-	Image& ResolveSurface(const ImageInfo& info) {
+	Image& ResolveSurface(const ImageInfo& info, vk::ImageCopy& copy) {
 		TextureCache::ImageDesc desc {};
 		desc.info                  = info;
 		desc.view_info.format      = info.pixel_format;
@@ -367,6 +365,17 @@ struct Presenter::Impl {
 		auto&      image      = cache.GetImage(image_id);
 		image.usage.video_out = true;
 		cache.UpdateImage(image_id);
+		const auto& backing = image.backing;
+		const auto& view = desc.view_info;
+		if (view.base_level >= backing.mip_levels || view.base_layer >= backing.layers ||
+		    (backing.image_type != vk::ImageType::e2D && backing.image_type != vk::ImageType::e3D) ||
+		    (backing.image_type == vk::ImageType::e3D && view.base_layer != 0) || backing.samples != 1) {
+			EXIT("unsupported presentation subresource: type=%d mip=%u/%u layer=%u/%u samples=%u\n",
+			     static_cast<int>(backing.image_type), view.base_level, backing.mip_levels,
+			     view.base_layer, backing.layers, backing.samples);
+		}
+		copy = PresentationCopy({info.extent.width, info.extent.height}, backing.extent,
+		                        view.base_level, view.base_layer);
 		return image;
 	}
 	bool Present(bool (*flip_ready)(void*) = nullptr, void* context = nullptr);
@@ -1671,13 +1680,13 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 	frame->source_flags = VideoOutSourceFlags(video_out_format);
 	frame->blank        = false;
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());
-	auto&             image = m_impl->ResolveSurface(info);
+	vk::ImageCopy     copy {};
+	auto&             image = m_impl->ResolveSurface(info, copy);
 	if (image.backing.format == vk::Format::eUndefined) {
 		EXIT("unsupported presentation source, image=%p\n", static_cast<const void*>(&image));
 	}
-	frame->Configure(m_impl->window.graphic_ctx,
-	                 {image.backing.extent.width, image.backing.extent.height}, frame_format);
-	frame->CopyFrom(buffer, image);
+	frame->Configure(m_impl->window.graphic_ctx, {copy.extent.width, copy.extent.height}, frame_format);
+	frame->CopyFrom(buffer, image, copy);
 	if (headset) {
 		frame->Transit(buffer.Handle(), vk::ImageLayout::eTransferSrcOptimal,
 		               vk::AccessFlagBits2::eTransferRead);
