@@ -374,7 +374,7 @@ private:
 			TableResolution*                      table      = nullptr;
 			ShaderRecompiler::IR::DescriptorValue source;
 			uint32_t                              root = 0;
-			ImageId                               pinned;
+			TableImageRef                         pinned;
 			bool always            = false;
 			bool unchecked_backing = false;
 			GuestRange span_range;
@@ -433,17 +433,16 @@ private:
 	                                      const ShaderRecompiler::IR::ResourceSnapshot&   snapshot,
 	                                      TableBindingState& state, uint64_t stamp,
 	                                      PreparedBindings& prepared);
-	void MarkTableChanges(TableBindingState& state);
-	void MarkTableElement(TableBindingState& state, uint32_t element);
-	void MarkTablePages(TableBindingState& state, uint64_t address, uint64_t size);
+	void MarkTableChanges(TableBindingState& state, PreparedBindings& prepared);
+	void MarkTablePages(TableBindingState& state, PreparedBindings& prepared, uint64_t address, uint64_t size);
 	void RebuildTableSpans(TableBindingState& state);
 	static void AddTableSpans(TableBindingState& state, uint32_t element);
 	void MergeTableSpans(TableBindingState& state, size_t sorted);
 	static void IndexTableSlots(TableBindingState& state);
 	void PatchTableSlots(const ShaderRecompiler::IR::CompiledShaderInfo& program,
 	                     const ShaderRecompiler::IR::ResourceSnapshot&   snapshot,
-	                     TableBindingState& state, uint64_t stamp);
-	void DropUnusedTableElements(TableBindingState& state);
+	                     TableBindingState& state, PreparedBindings& prepared, uint64_t stamp);
+	void DropUnusedTableElements(TableBindingState& state, PreparedBindings& prepared);
 	void FinishTableBindings(TableBindingState& state, const PreparedBindings& prepared);
 	void UnpinTableBindings(TableBindingState& state);
 	void RebindReusedTables(PreparedBindings& prepared);
@@ -627,7 +626,6 @@ private:
 	std::vector<vk::DescriptorImageInfo>  m_table_image_infos;
 	std::unordered_map<const void*, TableBindingState> m_table_states;
 	std::vector<std::pair<uint64_t, uint64_t>>         m_table_changes;
-	std::vector<uint32_t>                              m_table_marked;
 	std::vector<TableBindingState::PageSpan>           m_table_spans;
 	std::vector<uint32_t>                              m_table_remap;
 	struct ChangedTableSlot {

@@ -714,14 +714,14 @@ bool TextureCache::WasDiscardedTarget(const Image& image) const {
 	});
 }
 
-void TextureCache::PinImage(ImageId id) {
-	if (auto* image = m_slot_images.try_get(id); image != nullptr) {
+void TextureCache::PinImage(TableImageRef ref) {
+	if (auto* image = ref.Get(m_slot_images); image != nullptr) {
 		image->table_pins++;
 	}
 }
 
-void TextureCache::UnpinImage(ImageId id) {
-	if (auto* image = m_slot_images.try_get(id); image != nullptr && image->table_pins != 0) {
+void TextureCache::UnpinImage(TableImageRef ref) {
+	if (auto* image = ref.Get(m_slot_images); image != nullptr && image->table_pins != 0) {
 		image->table_pins--;
 	}
 }

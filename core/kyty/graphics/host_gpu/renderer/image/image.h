@@ -29,6 +29,19 @@ struct ImageTestAccess;
 
 using ImageId = Common::SlotId;
 
+struct TableImageRef {
+	ImageId  id;
+	uint64_t serial = 0;
+
+	bool operator==(const TableImageRef&) const = default;
+
+	template<class Images>
+	[[nodiscard]] auto Get(Images& images) const {
+		auto* image = images.try_get(id);
+		return image != nullptr && image->serial == serial ? image : nullptr;
+	}
+};
+
 struct CachedImageView {
 	ImageViewInfo info;
 	vk::ImageView view = nullptr;

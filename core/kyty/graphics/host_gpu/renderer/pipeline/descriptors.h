@@ -62,6 +62,9 @@ struct TextureBinding {
 	TextureDescDerivation* lookup = nullptr;
 	bool                   reused   = false;
 	bool                   declined = false;
+	uint64_t               table_serial = 0;
+
+	[[nodiscard]] TableImageRef TableImage() const { return {image_id, table_serial}; }
 };
 
 struct PreparedBindings {
@@ -103,6 +106,13 @@ struct PreparedBindings {
 	std::vector<TextureDescDerivation*>                image_descs;
 	const DrawTemplateStage* template_stage  = nullptr;
 	uint64_t                 template_images = 0;
+
+	void MarkTableElement(std::span<uint64_t> marks, uint64_t stamp, uint32_t element) {
+		if (marks[element] != stamp) {
+			marks[element] = stamp;
+			table_visits.push_back(element);
+		}
+	}
 };
 
 [[nodiscard]] vk::DescriptorType

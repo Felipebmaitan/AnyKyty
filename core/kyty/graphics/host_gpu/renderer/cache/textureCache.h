@@ -196,8 +196,8 @@ public:
 	[[nodiscard]] uint32_t ImageVersion(ImageId id) const noexcept {
 		return m_image_versions.Load(id.index);
 	}
-	void PinImage(ImageId id);
-	void UnpinImage(ImageId id);
+	void PinImage(TableImageRef ref);
+	void UnpinImage(TableImageRef ref);
 	void RunGarbageCollector();
 
 private:
