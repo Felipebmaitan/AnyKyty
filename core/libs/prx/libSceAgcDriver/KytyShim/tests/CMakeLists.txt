@@ -512,7 +512,7 @@ set_tests_properties(kyty_shim_mesh_per_primitive_block_draw PROPERTIES TIMEOUT 
         PASS_REGULAR_EXPRESSION "kyty_shim_mesh_per_primitive_block_draw: ok" FAIL_REGULAR_EXPRESSION "terminate called|FAILED")
 
 if(NOT ANYPS5_KYTY_DLL)
-    add_test_executable(kyty_shim_recompiler_robustness_tests ${CMAKE_CURRENT_SOURCE_DIR}/RecompilerRobustness.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
+    add_test_executable(kyty_shim_recompiler_robustness_tests ${CMAKE_CURRENT_SOURCE_DIR}/RecompilerRobustness.cpp ${CMAKE_CURRENT_SOURCE_DIR}/FixedLoopTail.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/Log.cpp)
     target_include_directories(kyty_shim_recompiler_robustness_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../fuzz)
     target_include_directories(kyty_shim_recompiler_robustness_tests SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Tools/include)
     configure_host_test_executable(kyty_shim_recompiler_robustness_tests)

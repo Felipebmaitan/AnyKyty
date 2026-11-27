@@ -180,9 +180,263 @@ bool ReachesBarrier(const Program& program, const Block& header) {
 	return false;
 }
 
+using Op = ValueOpcode;
+
+enum class BranchScope { Unknown, Constant, WaveVote };
+
+BranchScope ScopeOfBranch(Value condition) {
+	for (unsigned depth = 0; depth < 24; ++depth) {
+		condition = condition.Resolve();
+		if (condition.IsImmediate()) return condition.GetType() == Type::U1 ? BranchScope::Constant : BranchScope::Unknown;
+		const auto* inst = condition.Instruction();
+		if (inst->GetOpcode() == Op::LogicalNot) {
+			condition = inst->Arg(0);
+			continue;
+		}
+		if (inst->GetOpcode() != Op::ConditionRef) return BranchScope::Unknown;
+		switch (inst->Flags<CFG::BranchCondition>()) {
+			case CFG::BranchCondition::ExecZero:
+			case CFG::BranchCondition::ExecNonZero:
+			case CFG::BranchCondition::VccZero:
+			case CFG::BranchCondition::VccNonZero:
+			case CFG::BranchCondition::SccZero:
+			case CFG::BranchCondition::SccNonZero: return BranchScope::WaveVote;
+			case CFG::BranchCondition::ScalarInstruction:
+				condition = inst->Arg(0);
+				break;
+			default: return BranchScope::Unknown;
+		}
+	}
+	return BranchScope::Unknown;
 }
 
-const char* GuardLoop(Program& program, Block& header, uint32_t limit, LoopExit mode) {
+bool SupportsFixedTails(const Program& program) {
+	return std::ranges::all_of(program.blocks, [](const Block* block) {
+		if (std::ranges::any_of(*block, [](const Inst& inst) {
+			return inst.GetOpcode() == Op::UndefU1 || inst.GetOpcode() == Op::UndefU32;
+		})) return false;
+		switch (block->terminator.kind) {
+			case CFG::TerminatorKind::Branch:
+			case CFG::TerminatorKind::Return: return true;
+			case CFG::TerminatorKind::ConditionalBranch: return ScopeOfBranch(block->condition) != BranchScope::Unknown;
+			default: return false;
+		}
+	});
+}
+
+struct FixedTraversal {
+	Inst* cursor {};
+	Inst* step {};
+	size_t back {};
+	Value records;
+	Value active;
+};
+
+bool PlainLoopInstruction(Op op) {
+	switch (op) {
+		case Op::Phi:
+		case Op::Reference:
+		case Op::ConditionRef:
+		case Op::SelectU32:
+		case Op::LogicalNot:
+		case Op::LogicalAnd:
+		case Op::LogicalOr:
+		case Op::IAdd32:
+		case Op::ISub32:
+		case Op::BitwiseAnd32:
+		case Op::BitwiseOr32:
+		case Op::ShiftLeftLogical32:
+		case Op::ShiftRightLogical32:
+		case Op::IEqual32:
+		case Op::INotEqual32:
+		case Op::SGreaterThan32:
+		case Op::UMin32:
+		case Op::BitCastF32U32:
+		case Op::BitCastU32F32:
+		case Op::FPOrdEqual32:
+		case Op::FPMin32:
+		case Op::FPMax32:
+		case Op::FPMinTri32:
+		case Op::FPMaxTri32:
+		case Op::CompositeExtractU32x2:
+		case Op::CompositeExtractU32x3:
+		case Op::CompositeExtractU32x4:
+		case Op::GetBufferResource: return true;
+		default: return false;
+	}
+}
+
+bool PlainRead(const Program& program, const Inst& inst) {
+	const auto op = inst.GetOpcode();
+	if (op != Op::LoadBufferU32 && op != Op::LoadBufferU32x2 && op != Op::LoadBufferU32x3 &&
+	    op != Op::LoadBufferU32x4) return false;
+	const auto index = inst.Flags<MemoryFlags>().index;
+	if (index >= program.memory_info.size()) return false;
+	const auto& memory = program.memory_info[index];
+	return memory.kind == ResourceKind::IndirectBuffer && !memory.coherent && !memory.typed &&
+	       !memory.formatted && memory.data_bits == 32u;
+}
+
+Value IndexedReadBound(const Program& program, const Inst& read, size_t first, size_t last) {
+	const auto& memory = program.memory_info[read.Flags<MemoryFlags>().index];
+	if (!memory.idxen || read.Arg(3) != Value(0u)) return {};
+	const auto* desc = read.Arg(0).Resolve().TryInstruction();
+	if (desc == nullptr || desc->GetOpcode() != Op::GetBufferResource) return {};
+	const auto format = desc->Arg(3).Resolve();
+	if (!format.IsImmediate() || format.GetType() != Type::U32) return {};
+	const auto oob_mode = (format.U32() >> 28u) & 3u;
+	const bool add_tid = ((format.U32() >> 23u) & 1u) != 0;
+	if (oob_mode >= 2 || add_tid) return {};
+	const auto bound = desc->Arg(2).Resolve();
+	const auto* origin = bound.TryInstruction();
+	return origin != nullptr && InsideLoop(program, origin->Parent(), first, last) ? Value {} : bound;
+}
+
+bool FixedCursor(const Program& program, Inst& phi, size_t back, size_t first, size_t last, FixedTraversal& plan) {
+	auto* step = phi.Arg(back).Resolve().TryInstruction();
+	if (step == nullptr || step->GetOpcode() != Op::SelectU32 || step->Arg(2) != Value(&phi)) return false;
+	auto* add = step->Arg(1).Resolve().TryInstruction();
+	if (add == nullptr || add->GetOpcode() != Op::IAdd32) return false;
+	const auto one = Value(1u);
+	if (!((add->Arg(0) == one && add->Arg(1) == Value(&phi)) ||
+	      (add->Arg(1) == one && add->Arg(0) == Value(&phi)))) return false;
+	if (add->UseCount() != 1) return false;
+	Value records;
+	for (const auto& use: phi.Uses()) {
+		const auto* user = use.user;
+		if (!InsideLoop(program, user->Parent(), first, last) || user == step || user == add) continue;
+		if (!PlainRead(program, *user) || use.operand != 1 || user->Arg(4) != step->Arg(0)) return false;
+		const auto bound = IndexedReadBound(program, *user, first, last);
+		if (bound.IsEmpty()) return false;
+		if (!records.IsEmpty() && records != bound) return false;
+		records = bound;
+	}
+	if (records.IsEmpty() || step->Parent() != program.blocks[last]) return false;
+	if (std::ranges::any_of(step->Uses(), [&](const Use& use) { return use.user != &phi; })) return false;
+	plan = {&phi, step, back, records, step->Arg(0)};
+	return true;
+}
+
+FixedTraversal FindFixedTraversal(const Program& program, size_t first, size_t last) {
+	FixedTraversal plan;
+	auto* header = program.blocks[first];
+	auto* latch = program.blocks[last];
+	if (header->ImmPredecessors().size() != 2 || latch == header) return {};
+	for (size_t at = first; at <= last; ++at) {
+		auto& block = *program.blocks[at];
+		if (at != first && (block.terminator.loop_header || block.ImmPredecessors().empty())) return {};
+		if (block.terminator.kind != CFG::TerminatorKind::Branch &&
+		    block.terminator.kind != CFG::TerminatorKind::ConditionalBranch) return {};
+		if (at != first) {
+			for (const auto* pred: block.ImmPredecessors()) {
+				if (!InsideLoop(program, pred, first, at - 1)) return {};
+			}
+		}
+		for (auto& inst: block) {
+			if (!PlainLoopInstruction(inst.GetOpcode()) && !PlainRead(program, inst)) return {};
+			if (at == first && inst.GetOpcode() == Op::Phi) {
+				if ((inst.GetType() != Type::U32 && inst.GetType() != Type::U1) || inst.NumArgs() != 2) return {};
+				const size_t back = inst.PhiBlock(0) == latch ? 0 : 1;
+				if (inst.PhiBlock(back) != latch) return {};
+				if (inst.GetType() == Type::U32) {
+					FixedTraversal found;
+					if (FixedCursor(program, inst, back, first, last, found)) {
+						if (plan.cursor != nullptr) return {};
+						plan = found;
+					}
+				}
+			}
+		}
+	}
+	return plan;
+}
+
+Value Append(Block& block, Op op, std::initializer_list<Value> args) {
+	return Value(&block.AppendNewInst(op, args));
+}
+
+Value DeterminateInputs(const Program& program, size_t first, size_t last) {
+	std::vector<Value> clean(last - first + 1);
+	for (size_t at = first; at <= last; ++at) {
+		auto& block = *program.blocks[at];
+		Value valid(true);
+		if (at != first) {
+			const auto preds = block.ImmPredecessors();
+			valid = clean[BlockAt(program, preds.front()) - first];
+			if (!std::ranges::all_of(preds, [&](auto* pred) { return clean[BlockAt(program, pred) - first] == valid; })) {
+				auto& phi = *block.PrependNewInst(block.begin(), Op::Phi);
+				phi.SetFlags(Type::U1);
+				for (auto* pred: preds) phi.AddPhiOperand(pred, clean[BlockAt(program, pred) - first]);
+				valid = Value(&phi);
+			}
+		}
+		std::vector<Value> float_inputs;
+		std::vector<Value> shifts;
+		for (const auto& inst: block) {
+			const auto op = inst.GetOpcode();
+			if (op == Op::Phi) continue;
+			if (op == Op::ShiftLeftLogical32 || op == Op::ShiftRightLogical32) shifts.push_back(inst.Arg(1));
+			for (size_t i = 0; i < inst.NumArgs(); ++i) {
+				const auto arg = inst.Arg(i).Resolve();
+				if (arg.GetType() != Type::F32 || std::ranges::find(float_inputs, arg) != float_inputs.end()) continue;
+				float_inputs.push_back(arg);
+			}
+		}
+		for (const auto arg: float_inputs) {
+			const auto* producer = arg.TryInstruction();
+			const auto bits = producer != nullptr && producer->GetOpcode() == Op::BitCastF32U32
+			    ? producer->Arg(0) : Append(block, Op::BitCastU32F32, {arg});
+			const auto magnitude = Append(block, Op::BitwiseAnd32, {bits, Value(0x7fffffffu)});
+			const auto non_nan = Append(block, Op::ULessThanEqual32, {magnitude, Value(0x7f800000u)});
+			valid = Append(block, Op::LogicalAnd, {valid, non_nan});
+		}
+		for (const auto shift: shifts) {
+			if (shift.IsImmediate() && shift.U32() < 32u) continue;
+			valid = Append(block, Op::LogicalAnd, {valid, Append(block, Op::ULessThan32, {shift, Value(32u)})});
+		}
+		clean[at - first] = valid;
+	}
+	return clean.back();
+}
+
+void SkipFixedTail(const Program& program, const FixedTraversal& plan, Inst& count, Value next, uint32_t limit,
+                   size_t first, size_t last) {
+	auto& latch = *program.blocks[last];
+	const auto add = [&](Op op, std::initializer_list<Value> args) { return Append(latch, op, args); };
+	auto stable = DeterminateInputs(program, first, last);
+	for (auto& phi: *program.blocks[first]) {
+		if (phi.GetOpcode() != Op::Phi) break;
+		if (&phi == &count || &phi == plan.cursor) continue;
+		const auto value = phi.Arg(phi.PhiBlock(0) == &latch ? 0 : 1);
+		const auto same = phi.GetType() == Type::U32 ? add(Op::IEqual32, {Value(&phi), value})
+		    : add(Op::LogicalNot, {add(Op::LogicalXor, {Value(&phi), value})});
+		stable = add(Op::LogicalAnd, {stable, same});
+	}
+	const auto remaining = add(Op::ISub32, {Value(limit), next});
+	const auto cursor = Value(plan.cursor);
+	const auto tail = add(Op::UGreaterThanEqual32, {cursor, plan.records});
+	const auto room = add(Op::ISub32, {Value(UINT32_MAX), Value(plan.step)});
+	const auto no_wrap = add(Op::ULessThanEqual32, {remaining, room});
+	const auto monotone = add(Op::UGreaterThanEqual32, {Value(plan.step), cursor});
+	const auto advances = add(Op::LogicalAnd, {tail, add(Op::LogicalAnd, {no_wrap, monotone})});
+	const auto safe = add(Op::LogicalOr, {add(Op::LogicalNot, {plan.active}), advances});
+	const auto good = add(Op::LogicalAnd, {stable, safe});
+	auto& header = *program.blocks[first];
+	auto& previous = *header.PrependNewInst(header.begin(), Op::Phi);
+	previous.SetFlags(Type::U1);
+	for (auto* pred: header.ImmPredecessors()) previous.AddPhiOperand(pred, pred == &latch ? good : Value(false));
+	const auto changed = add(Op::LogicalNot, {add(Op::LogicalAnd, {Value(&previous), good})});
+	const Value any(&latch.AppendNewInst(Op::ConditionRef, {changed},
+	                                    static_cast<uint64_t>(CFG::BranchCondition::ExecNonZero)));
+	const auto skip = add(Op::LogicalNot, {any});
+	const auto delta = add(Op::SelectU32, {add(Op::LogicalAnd, {skip, plan.active}), remaining, Value(0u)});
+	plan.cursor->SetArg(plan.back, add(Op::IAdd32, {Value(plan.step), delta}));
+	count.SetArg(count.PhiBlock(0) == &latch ? 0 : 1, add(Op::SelectU32, {skip, Value(limit), next}));
+}
+
+}
+
+static const char* GuardLoopImpl(Program& program, Block& header, uint32_t limit, LoopExit mode, bool fixed_tail) {
 	const auto first = BlockAt(program, &header);
 	const auto last  = BlockAt(program, header.terminator.continue_block);
 	auto*      merge = header.terminator.merge_block;
@@ -217,6 +471,9 @@ const char* GuardLoop(Program& program, Block& header, uint32_t limit, LoopExit 
 			}
 		}
 	}
+	const bool can_skip = fixed_tail && plain && exit != nullptr && latch == program.blocks[last] &&
+	                      ScopeOfBranch(exit->condition) == BranchScope::WaveVote;
+	const auto plan = can_skip ? FindFixedTraversal(program, first, last) : FixedTraversal {};
 	auto& count = *header.PrependNewInst(header.begin(), ValueOpcode::Phi);
 	count.SetFlags(Type::U32);
 	const auto body = std::ranges::find_if(header, [](const Inst& inst) { return inst.GetOpcode() != ValueOpcode::Phi; });
@@ -224,6 +481,7 @@ const char* GuardLoop(Program& program, Block& header, uint32_t limit, LoopExit 
 	for (auto* pred: header.ImmPredecessors()) {
 		count.AddPhiOperand(pred, pred == latch ? Value(&next) : Value(0u));
 	}
+	if (plan.cursor != nullptr) SkipFixedTail(program, plan, count, Value(&next), limit, first, last);
 	if (conditional) {
 		LeaveAfter(*latch, header, Value(&next), limit, mark);
 		return nullptr;
@@ -250,6 +508,10 @@ const char* GuardLoop(Program& program, Block& header, uint32_t limit, LoopExit 
 	return nullptr;
 }
 
+const char* GuardLoop(Program& program, Block& header, uint32_t limit, LoopExit mode) {
+	return GuardLoopImpl(program, header, limit, mode, false);
+}
+
 LoopGuards GuardComputeLoops(Program& program, uint32_t limit, bool several_waves, std::span<Block* const> bounded) {
 	LoopGuards guards;
 	if (program.dispatcher_fallback) {
@@ -263,6 +525,7 @@ LoopGuards GuardComputeLoops(Program& program, uint32_t limit, bool several_wave
 		const auto& term = block->terminator;
 		if (term.loop_header && term.continue_block != nullptr && term.merge_block != nullptr) headers.push_back(block);
 	}
+	const bool fixed_tail = !headers.empty() && !several_waves && SupportsFixedTails(program);
 	for (auto* header: headers) {
 		if (std::ranges::find(bounded, header) != bounded.end()) {
 			++guards.bounded;
@@ -270,7 +533,7 @@ LoopGuards GuardComputeLoops(Program& program, uint32_t limit, bool several_wave
 		}
 		const char* refusal = rendezvous && ReachesBarrier(program, *header)
 		                          ? "a barrier shared by several waves can follow the loop exit"
-		                          : GuardLoop(program, *header, limit, LoopExit::Guard);
+		                          : GuardLoopImpl(program, *header, limit, LoopExit::Guard, fixed_tail);
 		if (refusal == nullptr) {
 			++guards.guarded;
 			continue;
