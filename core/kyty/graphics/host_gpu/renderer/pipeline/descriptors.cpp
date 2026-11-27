@@ -1133,9 +1133,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		*examined = desc.info.data;
 	}
 	if (table_candidate &&
-	    ((!texture_cache.IsRegionGpuModified(desc.info.data.address, desc.info.data.size) &&
-	      !Libs::LibKernel::Memory::IsBackingReadable(desc.info.data.address,
-	                                                  desc.info.data.size)) ||
+	    ((!Libs::LibKernel::Memory::IsBackingReadable(desc.info.data.address, desc.info.data.size) &&
+	      !texture_cache.IsRegionGpuModified(desc.info.data.address, desc.info.data.size)) ||
 	     (desc.info.metadata.kind != ImageMetadataKind::None &&
 	      !Libs::LibKernel::Memory::IsBackingReadable(desc.info.metadata.range.address,
 	                                                  desc.info.metadata.range.size)))) {
@@ -1382,6 +1381,15 @@ RenderExecutor::FindTableResolution(const ShaderRecompiler::IR::ImageResource& r
 	view.table_capacity       = 0;
 	view.table_mapping_offset = 0;
 	view.table_entry_mask     = 0;
+	view.descriptor_index      = UINT32_MAX;
+	view.table_descriptor_base = UINT32_MAX;
+	view.paired_view           = ShaderRecompiler::IR::ImageResource::NoIndirectImage;
+	view.indirect_mapping_offset = 0;
+	view.indirect_search_iterations = 0;
+	view.indirect_resources.clear();
+	if (view.indirect_root != ShaderRecompiler::IR::ImageResource::NoIndirectImage) {
+		view.indirect_root = 0;
+	}
 	return m_table_resolutions.Find(
 	    view, [this](TableResolution& table) { RetireTableResolution(table); }, TableOversized);
 }
@@ -1389,8 +1397,8 @@ RenderExecutor::FindTableResolution(const ShaderRecompiler::IR::ImageResource& r
 bool RenderExecutor::TableElementBackingReadable(const TableElementResolution& element) {
 	const auto& data = element.range;
 	const bool  data_readable =
-	    m_context.GetTextureCache().IsRegionGpuModified(data.address, data.size) ||
-	    Libs::LibKernel::Memory::IsBackingReadable(data.address, data.size);
+	    Libs::LibKernel::Memory::IsBackingReadable(data.address, data.size) ||
+	    m_context.GetTextureCache().IsRegionGpuModified(data.address, data.size);
 	return data_readable &&
 	       (element.metadata_range.Empty() ||
 	        Libs::LibKernel::Memory::IsBackingReadable(element.metadata_range.address,
@@ -2401,7 +2409,11 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			table_state->values.push_back(value);
 			auto& memo = resolution.slots[slot];
 			if (memo.element != nullptr && memo.dwords == value.dwords) {
-				add(ResolveTableElement(resolution, value, stamp, memo.element), value);
+				auto& element = *memo.element;
+				if (element.prepared_stamp != stamp) {
+					(void)ResolveTableElement(resolution, value, stamp, &element);
+				}
+				add(element, value);
 			} else {
 				auto& element = ResolveTableElement(resolution, value, stamp);
 				memo          = {value.dwords, &element, element.version_slot};
