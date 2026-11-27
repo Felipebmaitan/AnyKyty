@@ -2083,6 +2083,7 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	m_in_place_write       = InPlaceMemory::WriteKind::Binding;
 	m_texture_cache.ProtectPendingImageWriteBacks(vaddr, size);
 	dst->Fill(dst_offset, size, value);
+	m_texture_cache.ApplyPartialBufferCopy(vaddr, size, *dst, dst_offset);
 	if (!meta) {
 		m_texture_cache.NoteMetaFill(vaddr, size, value, false);
 	}
