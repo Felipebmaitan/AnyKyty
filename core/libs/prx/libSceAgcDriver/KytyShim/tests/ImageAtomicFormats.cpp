@@ -1,26 +1,24 @@
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include <array>
 #include <cstdio>
+#include <string_view>
 
 namespace {
 
 using namespace Libs::Graphics;
 using namespace Libs::Graphics::ShaderRecompiler;
+using F = Prospero::BufferFormat;
 
-bool CheckAtomicImageMaterialization(Prospero::BufferFormat format, bool wide, bool expected) {
-    IR::ResourcePlan plan;
-    plan.stage = ShaderType::Compute;
-    plan.resource_tracking_complete = true;
-    plan.srt_plan_complete = true;
-    const std::array<uint32_t, 8> words {0x1000u, (static_cast<uint32_t>(format) << 20u) | (3u << 30u),
-                                         15u, 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u};
-    IR::DescriptorSource source;
-    source.dword_count = words.size();
-    for (size_t i = 0; i < words.size(); ++i) {
-        source.dwords[i] = IR::Value(words[i]);
-    }
-    plan.descriptor_sources.push_back(std::move(source));
+constexpr std::array word_formats {F::k32UInt, F::k32Float, F::k32SInt};
+constexpr std::array wide_formats {F::k32_32UInt, F::k32_32Float, F::k32_32SInt, F::k16_16_16_16Float};
+
+ShaderTextureResource AtomicDescriptor(F format) {
+    return {{0x1000u, (static_cast<uint32_t>(format) << 20u) | (3u << 30u), 15u, 0xfacu | (9u << 28u)}};
+}
+
+IR::ImageResource AtomicResource(bool wide) {
     IR::ImageResource image;
     image.resource_class = IR::ImageResourceClass::Storage;
     image.dimension = Decoder::ImageDimension::Dim2D;
@@ -29,7 +27,28 @@ bool CheckAtomicImageMaterialization(Prospero::BufferFormat format, bool wide, b
     image.read = true;
     image.written = true;
     image.source = 0u;
-    plan.info.images.push_back(image);
+    return image;
+}
+
+void CheckAtomicStorageBinding(F format, bool wide) {
+    auto image = AtomicResource(wide);
+    image.numeric_class = Prospero::TextureNumericClass::Uint;
+    ValidateStorageTexture(image, AtomicDescriptor(format), wide ? 128u : 64u);
+}
+
+bool CheckAtomicImageMaterialization(Prospero::BufferFormat format, bool wide, bool expected) {
+    IR::ResourcePlan plan;
+    plan.stage = ShaderType::Compute;
+    plan.resource_tracking_complete = true;
+    plan.srt_plan_complete = true;
+    const auto descriptor = AtomicDescriptor(format);
+    IR::DescriptorSource source;
+    source.dword_count = std::size(descriptor.fields);
+    for (size_t i = 0; i < source.dword_count; ++i) {
+        source.dwords[i] = IR::Value(descriptor.fields[i]);
+    }
+    plan.descriptor_sources.push_back(std::move(source));
+    plan.info.images.push_back(AtomicResource(wide));
     IR::CompileSrtWalker(plan);
     IR::ResourceSnapshot snapshot;
     IR::ResourceSpecialization specialization;
@@ -45,14 +64,19 @@ bool CheckAtomicImageMaterialization(Prospero::BufferFormat format, bool wide, b
 
 }
 
-int main() {
-    using F = Libs::Graphics::Prospero::BufferFormat;
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--bindings") {
+        for (const auto format : word_formats) CheckAtomicStorageBinding(format, false);
+        for (const auto format : wide_formats) CheckAtomicStorageBinding(format, true);
+        return 0;
+    }
+    if (argc != 1) return 1;
     bool passed = true;
-    for (const auto format : {F::k32UInt, F::k32Float, F::k32SInt}) {
+    for (const auto format : word_formats) {
         passed &= CheckAtomicImageMaterialization(format, false, true);
         passed &= CheckAtomicImageMaterialization(format, true, false);
     }
-    for (const auto format : {F::k32_32UInt, F::k32_32Float, F::k32_32SInt, F::k16_16_16_16Float}) {
+    for (const auto format : wide_formats) {
         passed &= CheckAtomicImageMaterialization(format, true, true);
         passed &= CheckAtomicImageMaterialization(format, false, false);
     }
