@@ -1294,7 +1294,50 @@ void RenderExecutor::TrimTableResolutions() {
 	}
 }
 
-void RenderExecutor::LogTableSummary() {
+size_t RenderExecutor::TrimTableBindings() {
+	size_t slots = 0;
+	for (const auto& [program, state]: m_table_states) {
+		slots += state.values.capacity();
+	}
+	if (slots <= TableElementBudget) {
+		return slots;
+	}
+	constexpr uint64_t RecentPreparations = 256;
+	std::vector<std::pair<uint64_t, const void*>> candidates;
+	for (const auto& [program, state]: m_table_states) {
+		if (m_table_prepare_stamp - state.last_prepared >= RecentPreparations) {
+			candidates.emplace_back(state.last_prepared, program);
+		}
+	}
+	if (candidates.empty()) {
+		return slots;
+	}
+	std::ranges::sort(candidates, {}, &decltype(candidates)::value_type::first);
+	auto& semaphore = m_context.GetCommandScheduler().GetMasterSemaphore();
+	auto& heap      = m_context.GetDescriptorHeap();
+	semaphore.Refresh();
+	for (const auto& [stamp, program]: candidates) {
+		if (slots <= TableElementBudget) {
+			break;
+		}
+		const auto found = m_table_states.find(program);
+		auto&      state = found->second;
+		if (!std::ranges::all_of(state.ring, [&](const auto& entry) { return semaphore.IsFree(entry.tick); })) {
+			continue;
+		}
+		UnpinTableBindings(state);
+		heap.ReleasePersistent(state.slot_set);
+		for (const auto& entry: state.ring) {
+			heap.ReleasePersistent(entry.set);
+		}
+		slots -= state.values.capacity();
+		m_table_states.erase(found);
+		m_table_stats.retired_bindings++;
+	}
+	return slots;
+}
+
+void RenderExecutor::LogTableSummary(size_t binding_slots) {
 	auto&      stats = m_table_stats;
 	const auto now   = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                                  std::chrono::steady_clock::now().time_since_epoch())
@@ -1320,12 +1363,14 @@ void RenderExecutor::LogTableSummary() {
 	    "renewed, {} with other tables); {} finished states left invalid ({} for a renewed table entry, {} for "
 	    "a size mismatch); table cache of {} entries, one generation per entry: {} lookups, {} hits, {} new keys, "
 	    "{} keys made again after an eviction, {} evictions, {} cleared past {} elements, {} cleared for the element "
-	    "budget, {} generation bumps; {} entries in use, {} keys seen, {} elements\n",
+	    "budget, {} generation bumps; {} entries in use, {} keys seen, {} elements; "
+	    "{} shader bindings retained with {} slots, {} bindings retired\n",
 	    seconds, taken.prepared, taken.bindings, taken.reused, taken.prepared - taken.reused, taken.unfinished,
 	    taken.renewed, taken.layout, taken.left_renewed + taken.left_size, taken.left_renewed, taken.left_size,
 	    m_table_resolutions.Capacity(), cache.lookups, cache.hits, cache.created, cache.recreated, cache.evicted,
 	    cache.overflowed, MaxTableElements, cache.trimmed, cache.generations, m_table_resolutions.Size(),
-	    m_table_resolutions.KnownKeys(), m_table_element_count));
+	    m_table_resolutions.KnownKeys(), m_table_element_count, m_table_states.size(), binding_slots,
+	    taken.retired_bindings));
 }
 
 RenderExecutor::TableResolution&
@@ -1360,7 +1405,11 @@ RenderExecutor::ResolveTableElement(TableResolution&                            
 	const auto backing_epoch = Libs::LibKernel::Memory::BackingEpoch();
 	bool       inserted      = false;
 	if (known == nullptr) {
-		const auto [entry, emplaced] = table.elements.try_emplace(value.dwords);
+		static constexpr std::array<uint32_t, 8> null_descriptor {};
+		const auto& key = ShaderRecompiler::IR::ImageTableSlotCompatible(table.root, value)
+		                      ? value.dwords
+		                      : null_descriptor;
+		const auto [entry, emplaced] = table.elements.try_emplace(key);
 		known                        = &entry->second;
 		inserted                     = emplaced;
 		m_table_element_count += emplaced ? 1 : 0;
@@ -1734,7 +1783,13 @@ void RenderExecutor::PatchTableSlots(const ShaderRecompiler::IR::CompiledShaderI
 	std::vector<uint32_t> roots;
 	ForEachImageTable(program.info.images,
 	                  [&](uint32_t root_index, auto ) { roots.push_back(root_index); });
-	auto&        element_of   = state.element_of_version;
+	auto& element_of = m_table_patch_indices;
+	element_of.resize(m_table_element_versions.size());
+	for (uint32_t index = 0; index < state.elements.size(); ++index) {
+		const auto version = state.elements[index].resolution->version_slot;
+		EXIT_IF(version >= element_of.size());
+		element_of[version] = index;
+	}
 	const size_t sorted_spans = state.spans.size();
 	for (const auto& changed: m_table_changed_slots) {
 		auto&       range = state.ranges[changed.range];
@@ -1760,10 +1815,13 @@ void RenderExecutor::PatchTableSlots(const ShaderRecompiler::IR::CompiledShaderI
 			memo = {value.dwords, element, element->version_slot};
 		}
 		const auto version_slot = memo.version_slot;
-		if (version_slot < element_of.size() && element_of[version_slot] != UINT32_MAX) {
-			state.slots[changed.slot] = element_of[version_slot];
-			m_table_moved_slots.push_back(changed.slot);
-			continue;
+		if (version_slot < element_of.size()) {
+			const auto index = element_of[version_slot];
+			if (index < state.elements.size() && state.elements[index].resolution == element) {
+				state.slots[changed.slot] = index;
+				m_table_moved_slots.push_back(changed.slot);
+				continue;
+			}
 		}
 		if (!resolved) {
 			(void)ResolveTableElement(resolution, value, stamp, element);
@@ -1785,7 +1843,7 @@ void RenderExecutor::PatchTableSlots(const ShaderRecompiler::IR::CompiledShaderI
 		AddTableSpans(state, index);
 		EXIT_IF(version_slot == UINT32_MAX);
 		if (version_slot >= element_of.size()) {
-			element_of.resize(size_t {version_slot} + 1, UINT32_MAX);
+			element_of.resize(size_t {version_slot} + 1);
 		}
 		element_of[version_slot]  = index;
 		state.slots[changed.slot] = index;
@@ -1814,16 +1872,14 @@ void RenderExecutor::DropUnusedTableElements(TableBindingState& state) {
 			if (entry.pinned) {
 				texture_cache.UnpinImage(entry.pinned);
 			}
-			state.element_of_version[entry.resolution->version_slot] = UINT32_MAX;
 			continue;
 		}
 		remap[element] = kept;
 		if (kept != element) {
-			state.element_of_version[entry.resolution->version_slot] = kept;
-			state.elements[kept]                                     = std::move(entry);
-			state.infos[kept]                                        = state.infos[element];
-			state.marks[kept]                                        = state.marks[element];
-			state.checked[kept]                                      = state.checked[element];
+			state.elements[kept] = std::move(entry);
+			state.infos[kept]    = state.infos[element];
+			state.marks[kept]    = state.marks[element];
+			state.checked[kept]  = state.checked[element];
 		}
 		kept++;
 	}
@@ -1871,16 +1927,6 @@ void RenderExecutor::FinishTableBindings(TableBindingState& state,
 		state.slot_infos[slot] = state.infos[state.slots[slot]];
 	}
 	IndexTableSlots(state);
-	auto& element_of = state.element_of_version;
-	std::ranges::fill(element_of, UINT32_MAX);
-	for (uint32_t index = 0; index < state.elements.size(); index++) {
-		const auto version_slot = state.elements[index].resolution->version_slot;
-		EXIT_IF(version_slot == UINT32_MAX);
-		if (version_slot >= element_of.size()) {
-			element_of.resize(size_t {version_slot} + 1, UINT32_MAX);
-		}
-		element_of[version_slot] = index;
-	}
 	state.always.clear();
 	state.unchecked_backing.clear();
 	for (uint32_t index = 0; index < state.elements.size(); index++) {
@@ -2210,7 +2256,7 @@ void RenderExecutor::ResetBindings() {
 		TrimTableResolutions();
 	}
 	if ((++m_table_stats.resets & 255u) == 0) {
-		LogTableSummary();
+		LogTableSummary(TrimTableBindings());
 	}
 	auto& texture_cache = m_context.GetTextureCache();
 	for (const auto id: m_bound_images) {
@@ -2303,6 +2349,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	    })) {
 		table_state           = &m_table_states[&program];
 		table_state->compute  = program.stage == ShaderType::Compute;
+		table_state->last_prepared = stamp;
 		prepared.table_state  = table_state;
 		prepared.tables_reused =
 		    ReuseTableBindings(program, snapshot, *table_state, stamp, prepared);

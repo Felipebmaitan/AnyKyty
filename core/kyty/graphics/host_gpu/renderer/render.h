@@ -338,6 +338,7 @@ private:
 		uint64_t layout       = 0;
 		uint64_t left_renewed = 0;
 		uint64_t left_size    = 0;
+		uint64_t retired_bindings = 0;
 		uint64_t resets       = 0;
 		uint64_t window_ns    = 0;
 		bool     idle_logged  = false;
@@ -345,7 +346,8 @@ private:
 	void ConfigureTableResolutions();
 	void RetireTableResolution(TableResolution& table);
 	void TrimTableResolutions();
-	void LogTableSummary();
+	[[nodiscard]] size_t TrimTableBindings();
+	void LogTableSummary(size_t binding_slots);
 
 	[[nodiscard]] TableElementResolution&
 	ResolveTableElement(TableResolution& table, const ShaderRecompiler::IR::DescriptorValue& value,
@@ -391,7 +393,6 @@ private:
 		std::vector<vk::DescriptorImageInfo> slot_infos;
 		std::vector<uint32_t>                element_slot_begin;
 		std::vector<uint32_t>                element_slots;
-		std::vector<uint32_t>                element_of_version;
 		std::vector<PageSpan>                spans;
 		uint64_t                             max_span = 0;
 		std::vector<uint32_t>                always;
@@ -399,6 +400,7 @@ private:
 		bool                                 compute = false;
 		std::vector<uint64_t>                marks;
 		uint64_t                             mark_stamp = 0;
+		uint64_t                             last_prepared = 0;
 		struct Checked {
 			static constexpr uint32_t None      = UINT32_MAX;
 			static constexpr uint32_t NullImage = UINT32_MAX - 1;
@@ -639,6 +641,7 @@ private:
 	std::vector<uint32_t>                              m_table_checks;
 	std::vector<uint8_t>                               m_table_flags;
 	std::vector<uint32_t>                              m_table_element_versions;
+	std::vector<uint32_t>                              m_table_patch_indices;
 	std::vector<uint32_t>                              m_free_table_element_versions;
 	std::vector<uint64_t>                              m_bound_image_marks;
 	uint64_t                                           m_bound_image_stamp = 0;

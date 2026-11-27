@@ -23,6 +23,7 @@ public:
 
 	[[nodiscard]] vk::DescriptorSet Commit(vk::DescriptorSetLayout layout);
 	[[nodiscard]] vk::DescriptorSet CommitPersistent(vk::DescriptorSetLayout layout);
+	void ReleasePersistent(vk::DescriptorSet set);
 
 	static void RegisterLayout(vk::DescriptorSetLayout                         layout,
 	                           std::span<const vk::DescriptorSetLayoutBinding> bindings);
@@ -55,7 +56,7 @@ private:
 	std::vector<vk::DescriptorPoolSize>                m_free;
 	uint32_t                                           m_free_sets = 0;
 	std::deque<std::pair<Pool, uint64_t>>              m_pending_pools;
-	std::vector<vk::DescriptorPool>                    m_persistent_pools;
+	std::unordered_map<vk::DescriptorSet, vk::DescriptorPool> m_persistent_pools;
 	std::unordered_map<vk::DescriptorSetLayout, Batch> m_sets;
 	std::unordered_map<vk::DescriptorSetLayout, std::vector<vk::DescriptorPoolSize>> m_layout_sizes;
 };

@@ -528,6 +528,13 @@ struct RenderExecutor::ResolvedDraw {
 	std::atomic_bool       busy {false};
 	enum : uint8_t { Ready, Pending, Failed };
 	std::atomic<uint8_t> state {Ready};
+
+	void ReleaseLargeReadLog() {
+		constexpr size_t MaxRetainedBytes = 256 * 1024;
+		if (programs.reads.WordCount() >= MaxRetainedBytes / sizeof(uint32_t)) {
+			programs.reads = {};
+		}
+	}
 };
 
 struct RenderExecutor::ResolvedDrawRing {
@@ -569,6 +576,7 @@ void NoteFlatDefer(uint32_t words, uint32_t gpu_words) {
 
 void RenderExecutor::ReleaseResolvedDraw(ResolvedDraw* resolved) noexcept {
 	(void)WaitResolvedDraw(resolved);
+	resolved->ReleaseLargeReadLog();
 	resolved->busy.store(false, std::memory_order_release);
 }
 
@@ -1614,6 +1622,7 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDrawAhead(
 	if (!ResolveDrawPrograms(draw, context, user_config, shaders, indirect_offsets, indirect_draw, context_id,
 	                         user_config_id)) {
 		NoteAheadRefusal(false, draw.programs.reads.Refusal());
+		draw.ReleaseLargeReadLog();
 		return nullptr;
 	}
 	draw.busy.store(true, std::memory_order_relaxed);
@@ -1715,6 +1724,7 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveDispatchAhead(const HW::Con
 	if (slot.programs.reads.Failed() || slot.compute_module == nullptr) {
 		slot.compute_module = nullptr;
 		NoteAheadRefusal(true, slot.programs.reads.Refusal());
+		slot.ReleaseLargeReadLog();
 		return nullptr;
 	}
 	slot.busy.store(true, std::memory_order_relaxed);
@@ -1745,6 +1755,7 @@ RenderExecutor::ResolvedDraw* RenderExecutor::ResolveIndirectDispatchAhead(
 	if (slot.programs.reads.Failed() || slot.compute_module == nullptr) {
 		slot.compute_module = nullptr;
 		NoteAheadRefusal(true, slot.programs.reads.Refusal());
+		slot.ReleaseLargeReadLog();
 		return nullptr;
 	}
 	slot.busy.store(true, std::memory_order_relaxed);
