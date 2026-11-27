@@ -1,3 +1,4 @@
+#include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
@@ -33,7 +34,11 @@ IR::ImageResource AtomicResource(bool wide) {
 void CheckAtomicStorageBinding(F format, bool wide) {
     auto image = AtomicResource(wide);
     image.numeric_class = Prospero::TextureNumericClass::Uint;
-    ValidateStorageTexture(image, AtomicDescriptor(format), wide ? 128u : 64u);
+    const auto descriptor = AtomicDescriptor(format);
+    TileSizeAlign layout;
+    TileGetTextureTotalSize(format, descriptor.Width5() + 1u, descriptor.Height5() + 1u,
+                            1u, 1u, descriptor.TileMode(), false, layout);
+    ValidateStorageTexture(image, descriptor, layout.size);
 }
 
 bool CheckAtomicImageMaterialization(Prospero::BufferFormat format, bool wide, bool expected) {
