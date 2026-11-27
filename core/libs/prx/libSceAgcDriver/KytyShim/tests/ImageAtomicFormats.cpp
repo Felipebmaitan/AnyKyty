@@ -69,7 +69,7 @@ bool CheckAtomicImageMaterialization(Prospero::BufferFormat format, bool wide, b
 
 }
 
-int main(int argc, char** argv) {
+extern "C" int RunKytyImageAtomicFormatsTests(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--bindings") {
         for (const auto format : word_formats) CheckAtomicStorageBinding(format, false);
         for (const auto format : wide_formats) CheckAtomicStorageBinding(format, true);
