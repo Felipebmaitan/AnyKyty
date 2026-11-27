@@ -1263,10 +1263,10 @@ public:
 		m_mask  = capacity - 1u;
 		m_words = words;
 	}
-	std::pair<uint32_t, bool> TryEmplace(uint32_t entry, uint32_t slot) {
+	std::pair<uint32_t, bool> TryEmplace(uint32_t entry, uint32_t slot, uint32_t key_words) {
 		const auto* key = m_words + static_cast<size_t>(entry) * 8u;
 		uint64_t    h   = 0x9e3779b97f4a7c15ull;
-		for (uint32_t i = 0; i < 8u; i += 2u) {
+		for (uint32_t i = 0; i < key_words; i += 2u) {
 			uint64_t lane = (uint64_t {key[i + 1u]} << 32u) | key[i];
 			h             = (h ^ lane) * 0xff51afd7ed558ccdull;
 			h ^= h >> 32u;
@@ -1278,7 +1278,7 @@ public:
 				return {slot, true};
 			}
 			if (std::memcmp(m_words + static_cast<size_t>(cell.entry_plus_one - 1u) * 8u, key,
-			                8u * sizeof(uint32_t)) == 0) {
+			                key_words * sizeof(uint32_t)) == 0) {
 				return {cell.slot, false};
 			}
 		}
@@ -1318,13 +1318,12 @@ bool MaterializeImageTable(const ResourcePlan& program,
 	     uint64_t {entry_mask} + 1u, MaxIndirectDescriptorProbes});
 	const auto& root = program.info.images[image_index];
 	const auto same_table = [&](const ImageTableSnapshot& candidate) {
-		return candidate.base == base && candidate.size == size &&
-		       candidate.offset == indirect.table_offset && candidate.entry_mask == entry_mask;
+		return candidate.Matches(base, size, indirect.table_offset, entry_mask, root.r128);
 	};
 	auto found = std::ranges::find_if(snapshot.image_tables, same_table);
 	if (found == snapshot.image_tables.end()) {
 		ImageTableSnapshot next {.base = base, .size = size, .offset = indirect.table_offset,
-		                         .entry_mask = entry_mask};
+		                         .entry_mask = entry_mask, .r128 = root.r128};
 		static thread_local std::vector<uint32_t> words;
 		words.resize(static_cast<size_t>(entries) * 8u);
 		if (!words.empty() && !ReadScalarTable(base, size, indirect.table_offset, runtime, words)) {
@@ -1360,16 +1359,17 @@ bool MaterializeImageTable(const ResourcePlan& program,
 			next.mapping[0] = static_cast<uint32_t>(entries);
 			static thread_local TableSlotIndex flat_slot_of;
 			flat_slot_of.Reset(next.raw.data(), static_cast<size_t>(entries));
+			const uint32_t key_words = root.r128 ? 4u : 8u;
 			for (uint32_t entry = 0; entry < entries; entry++) {
 				DescriptorValue candidate {.dword_count = 8u};
-				std::copy_n(next.raw.begin() + entry * 8u, 8u, candidate.dwords.begin());
+				std::copy_n(next.raw.begin() + entry * 8u, key_words, candidate.dwords.begin());
 				if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, root.r128)) {
 					continue;
 				}
 				const auto new_slot = static_cast<uint32_t>(next.slots.size());
 				uint32_t   slot     = new_slot;
 				bool       inserted = false;
-				std::tie(slot, inserted) = flat_slot_of.TryEmplace(entry, new_slot);
+				std::tie(slot, inserted) = flat_slot_of.TryEmplace(entry, new_slot, key_words);
 				if (inserted) {
 					next.slots.push_back(candidate);
 				}
@@ -1443,8 +1443,8 @@ bool MaterializeImageTableHeap(const ResourcePlan& program,
 	ImageHeapView   view;
 	DescriptorValue exemplar {.dword_count = 8u};
 	if (captured != nullptr) {
-		if (runtime.image_heap == nullptr || captured->base != base || captured->size != size ||
-		    captured->offset != indirect.table_offset || captured->entry_mask != (indirect.table_mask >> 5u))
+		if (runtime.image_heap == nullptr ||
+		    !captured->Matches(base, size, indirect.table_offset, indirect.table_mask >> 5u, root.r128))
 			return false;
 		const auto found = std::ranges::find_if(captured->slots, [&](const auto& value) {
 			return ImageTableSlotCompatible(profile, value) && ImageTableHeapExemplar(profile, value);

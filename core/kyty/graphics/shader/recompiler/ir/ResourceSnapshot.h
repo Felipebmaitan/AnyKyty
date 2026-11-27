@@ -37,10 +37,16 @@ struct ImageTableSnapshot {
 	uint64_t                     size         = 0;
 	uint32_t                     offset       = 0;
 	uint32_t                     entry_mask   = 0;
+	bool                         r128         = false;
 	std::vector<uint32_t>        raw;
 	std::vector<DescriptorValue> slots;
 	std::vector<uint32_t>        mapping;
 	uint64_t                     slots_id = 0;
+
+	bool Matches(uint64_t address, uint64_t length, uint32_t first, uint32_t mask, bool short_descriptor) const {
+		return base == address && size == length && offset == first && entry_mask == mask &&
+		       r128 == short_descriptor;
+	}
 };
 
 struct GpuFlatLoad {

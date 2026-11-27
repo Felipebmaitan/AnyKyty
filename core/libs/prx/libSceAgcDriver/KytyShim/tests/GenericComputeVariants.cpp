@@ -205,6 +205,76 @@ struct TestImageHeap final: IR::ImageHeapSource {
 	}
 };
 
+void CheckImageTableWidths(IR::ResourcePlan& plan, const IR::SrtRuntime& runtime, TestImageHeap& heap, bool on) {
+	const auto original = plan.info.images.front();
+	const auto base = MakeTexture(TextureA, Format8888);
+	auto short_only = base;
+	short_only[4] = 0xe0000000u;
+	auto both = base;
+	both[7] = 0x1234u;
+	auto long_only = MakeTexture(TextureB, Format8888);
+	long_only[3] = (long_only[3] & 0x0fffffffu) | (static_cast<uint32_t>(Prospero::ImageType::kColor2DArray) << 28u);
+	const std::array entries {short_only, both, long_only};
+	for (size_t i = 0; i < entries.size(); ++i)
+		for (size_t j = 0; j < entries[i].size(); ++j)
+			Poke(TableAddress + i * 32u + j * 4u, entries[i][j]);
+
+	const auto check = [&](const Materialized& output, uint32_t root, bool short_view) {
+		if (!output.ok || root >= output.specialization.images.size()) return false;
+		const auto& image = output.specialization.images[root];
+		if (image.table >= output.snapshot.image_tables.size()) return false;
+		const auto& table = output.snapshot.image_tables[image.table];
+		const std::vector<uint32_t> expected = short_view ? std::vector<uint32_t>{3,1,1,0} : std::vector<uint32_t>{3,0,1,2};
+		return table.mapping == expected && table.slots.size() == (short_view ? 2u : 3u) &&
+		       SameTexture(table.slots[1], short_view ? base : both) &&
+		       (short_view || SameTexture(table.slots[2], long_only)) &&
+		       table.raw.size() == 24 && table.raw[4] == short_only[4] && table.raw[15] == both[7] &&
+		       image.table_mapping_offset + expected.size() <= output.snapshot.flattened_srt.size() &&
+		       std::equal(expected.begin(), expected.end(), output.snapshot.flattened_srt.begin() + image.table_mapping_offset);
+	};
+	heap.allow_direct = false;
+	heap.allow_rebind = true;
+	for (const bool first_short : {true,false}) {
+		Materialized first;
+		auto& root = plan.info.images[0];
+		root.r128 = first_short;
+		first.ok = IR::MaterializeResources(plan, runtime, first.snapshot, first.specialization);
+		Check(check(first, 0, first_short), "first width selects the proper image slots and words");
+		root.r128 = !first_short;
+		Materialized other;
+		other.ok = IR::MaterializeResources(plan, runtime, other.snapshot, other.specialization);
+		Check(check(other, 0, !first_short), "cross-call cache keeps the two widths distinct");
+		heap.allow_direct = true;
+		Materialized target;
+		target.ok = IR::MaterializeResources(plan, runtime, target.snapshot, target.specialization);
+		heap.allow_direct = false;
+		IR::ResourceSnapshot aligned;
+		heap.rebound_mapping.clear();
+		if (on && first.ok && other.ok && target.ok) {
+			Check(IR::RebindComputeImages(plan, runtime, other.snapshot, other.specialization, target.specialization, aligned) &&
+			      !heap.rebound_mapping.empty(), "matching captured image table can bind to the heap");
+			heap.rebound_mapping.clear();
+			IR::RebindComputeImages(plan, runtime, first.snapshot, first.specialization, target.specialization, aligned);
+			Check(heap.rebound_mapping.empty(), "captured image table with another width never reaches the heap");
+		}
+		first.ok = IR::MaterializeResources(plan, runtime, first.snapshot, first.specialization);
+		Check(check(first, 0, !first_short), "previous snapshot cannot provide slots of another width");
+	}
+
+	plan.info.images.push_back(original);
+	for (const bool first_short : {true,false}) {
+		plan.info.images[0].r128 = first_short;
+		plan.info.images[1].r128 = !first_short;
+		plan.info.images[1].skip_degamma = true;
+		plan.info.images[1].paired_view = 0u;
+		IR::CompileSrtWalker(plan);
+		Materialized mixed;
+		mixed.ok = IR::MaterializeResources(plan, runtime, mixed.snapshot, mixed.specialization);
+		Check(check(mixed, 0, first_short) && check(mixed, 1, !first_short) && mixed.snapshot.image_tables.size() == 2,
+		      "coexisting widths get distinct table mappings in either order");
+	}
+}
+
 void RebindTableAndHeap(bool on) {
 	auto fixture = Translate();
 	auto& plan = fixture.plan;
@@ -282,6 +352,7 @@ void RebindTableAndHeap(bool on) {
 	widened.images[0].table_capacity = 1;
 	Check(!IR::AlignResources(plan, table.snapshot, table.specialization, widened, nullptr),
 	      "an undersized table rejects the existing slots");
+	CheckImageTableWidths(plan, runtime, heap, on);
 }
 
 void Generic(bool on) {
